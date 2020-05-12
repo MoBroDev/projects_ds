@@ -1,0 +1,290 @@
+#Ökonometrische Analyse der Auswirkungen der Diskussion um den Nationalen Klimabeitrag auf ausgewählte Energieerzeuger
+
+########### Vorbereitung Datensatz ###########
+#Version 0.99.902
+########### Packages ###########
+library("xts", lib.loc="~/R/win-library/3.3")
+library("PerformanceAnalytics", lib.loc="~/R/win-library/3.3")
+library("zoo", lib.loc="~/R/win-library/3.3")
+library("TTR", lib.loc="~/R/win-library/3.3")
+library("stargazer", lib.loc="~/R/win-library/3.3")
+library("forecast", lib.loc="~/R/win-library/3.3")
+library("fGarch", lib.loc="~/R/win-library/3.3")
+library("FinTS", lib.loc="~/R/win-library/3.3")
+library("TSA", lib.loc="~/R/win-library/3.3")
+library("rugarch", lib.loc="~/R/win-library/3.3")
+library("strucchange", lib.loc="~/R/win-library/3.3")
+
+########### Vorbereitung ###########
+## Ljung-Box-Pierce-Test - bereitgestellt in "tsutil.r", entnommen aus Rainer Schlittgen, "Angewandte Zeitreihenanalyse mit R", ISBN 978-3-11-041398-4
+LjungBoxPierceTest<-function(y,n.par=0,maxlag=24){
+  la <- seq(6,maxlag,6) 
+  BT<-matrix(NA,length(la),4) 
+  for (i in c(1:length(la))){
+    if(la[i]>n.par){
+      bt <- Box.test(y,lag=la[i], type ="Ljung-Box",fitdf = n.par)  
+      BT[i,]<-round(c(la[i],bt$parameter,bt$statistic,bt$p.value),3)
+    }
+  }
+  colnames(BT)<-c("lags","df","statistic","p-value")
+  BT  
+}    
+
+## Kurszeitreihen
+# RWE
+rwe <- read.csv2("~/Bachelorarbeit/Daten/D.RWE_Time_Series_010614_010116_final.csv", stringsAsFactors=FALSE)
+rwe_xts<-xts(rwe, order.by=as.Date.character(rwe$Date, format="%Y-%m-%d")) #Convert into xts-format
+rwe_xts$Date=NULL #Remove "Date"-Column
+storage.mode(rwe_xts)<- "numeric"
+colnames(rwe_xts)<-c("RWE") #Rename Column-Names
+# EON
+eon <- read.csv2("~/Bachelorarbeit/Daten/D.EON_Time_Series_010114_010116_test.csv", stringsAsFactors=FALSE) #Import Dataset
+eon_xts<-xts(eon, order.by=as.Date.character(eon$Date, format="%Y-%m-%d")) #Convert into xts-format
+eon_xts$Date=NULL #Remove "Date"-Column
+storage.mode(eon_xts)<- "numeric"
+colnames(eon_xts)<-c("EON") #Rename Column-Names
+
+## Log-Renditen
+# RWE Log-Renditen
+rwe.logs.prep<-100*(diff(log(rwe$Stockprize), lag=1))
+rwe.date<-rwe$Date[-1]
+rwe.logs<-data.frame(rwe.date,rwe.logs.prep)
+colnames(rwe.logs)<-c("Date", "Returns")
+rwe_ret<-xts(rwe.logs, order.by=as.Date.character(rwe.logs$Date, format="%Y-%m-%d")) #Convert into xts-format
+rwe_ret$Date=NULL #Remove "Date"-Column
+storage.mode(rwe_ret)<- "numeric"
+colnames(rwe_ret)<-c("RWE Returns") #Rename Column-Names
+# EON Log-Renditen
+eon.logs.prep<-100*(diff(log(eon$Stockprize), lag=1))
+eon.date<-eon$Date[-1]
+eon.logs<-data.frame(eon.date,eon.logs.prep)
+colnames(eon.logs)<-c("Date", "Returns")
+eon_ret<-xts(eon.logs, order.by=as.Date.character(eon.logs$Date, format="%Y-%m-%d")) #Convert into xts-format
+eon_ret$Date=NULL #Remove "Date"-Column
+storage.mode(eon_ret)<- "numeric"
+colnames(eon_ret)<-c("EON Returns") #Rename Column-Names
+
+#################################
+
+## Abbildungen
+## Abbildung 3: Kurs- und logarithmierte Renditezeitreihe von RWE - Eigene Darstellung
+png("RWE_Prize_LogReturns_period.png",height=400,width=800)
+par(mar=c(4,4,4,4))
+chart.TimeSeries(rwe_xts, auto.grid = FALSE, lwd=1, yaxis=FALSE, xlab="", ylab="", main="", period.area="2015-03-27::2015-07-03")
+axis(2, col="black",las=1)  # las=1 makes horizontal labels
+mtext("Kurs in €",side=2,line=2.5)
+par(new=TRUE)
+chart.TimeSeries(rwe_ret, auto.grid = FALSE,lwd=1, yaxis=FALSE, xaxis = FALSE, ylab="", col="blue", main="")
+axis(4, col="black",las=1)
+mtext("Rendite in %",side=4,line=1.5)
+legend("bottomleft",legend=c("Kurs","Rendite"), lty=c(1,1,1), text.col=c("black","blue"),col=c("black","blue"))
+box()
+dev.off()
+
+## Abbildung 4: Kurs- und logarithmierte Renditezeitreihe von E.ON - Eigene Darstellung
+png("EON_Prize_LogReturns_period.png",height=400,width=800)
+par(mar=c(4,4,4,4))
+chart.TimeSeries(eon_xts, auto.grid = FALSE, lwd=1, yaxis=FALSE, xlab="", ylab="", main="", period.area="2015-03-27::2015-07-03")
+axis(2, col="black",las=1)  # las=1 makes horizontal labels
+mtext("Kurs in €",side=2,line=2.5)
+par(new=TRUE)
+chart.TimeSeries(eon_ret, auto.grid = FALSE,lwd=1, yaxis=FALSE, xaxis = FALSE, ylab="", col="blue", main="")
+axis(4, col="black",las=1)
+mtext("Rendite in %",side=4,line=1.5)
+legend("bottom",legend=c("Kurs","Rendite"), lty=c(1,1,1), text.col=c("black","blue"),col=c("black","blue"))
+box()
+dev.off()
+
+## Abbildung 5: Renditezeitreihen von RWE und E.ON am 23. März 2015
+png("Ret_23032015.png",height=400,width=600)
+par(mfrow=c(2,1))
+chart.TimeSeries(rwe_ret[200:220], lwd = 1, ylab="Log-Renditen in %", xlab="Datum", main="Log-Renditen RWE 23.03.2015", legend.loc="topright", period.area="2015-03-20::2015-03-23", date.format = "")
+chart.TimeSeries(eon_ret[200:220], lwd = 1, ylab="Log-Renditen in %", xlab="Datum", main="Log-Renditen E.ON 23.03.2015", legend.loc="topright", period.area="2015-03-20::2015-03-23", date.format = "")
+dev.off()
+
+## Abbildung 6: Renditezeitreihen von RWE und E.ON am 3. Juli 2015
+png("Ret_03072015.png",height=400,width=600)
+par(mfrow=c(2,1))
+chart.TimeSeries(rwe_ret[274:294], lwd = 1, ylab="Log-Renditen in %", xlab="Datum", main="Log-Renditen RWE 03.07.2015", legend.loc="topright", period.area="2015-07-02::2015-07-03", date.format = "")
+chart.TimeSeries(eon_ret[274:294], lwd = 1, ylab="Log-Renditen in %", xlab="Datum", main="Log-Renditen E.ON 03.07.2015", legend.loc="bottomright", period.area="2015-07-02::2015-07-03", date.format = "")
+dev.off()
+
+## Abbildung 7: Normalverteilungs-QQ-Diagramm der Modellresiduen der Dax, RWE und E.ON Renditezeitreihen
+png("QQ_Residuals.png",height=300,width=600)
+par(mfrow=c(1,2))
+qqnorm(res_rwe2, main="Q-Q Diagramm RWE Residuen", ylab = "experimentelle Quantile", xlab = "theoretische Quantile")
+abline(mean(res_rwe2),sd(res_rwe2))
+qqnorm(res_eon2, main="Q-Q Diagramm E.ON Residuen", ylab = "experimentelle Quantile", xlab = "theoretische Quantile")
+abline(mean(res_eon2),sd(res_eon2))
+dev.off()
+
+## Abbildung 10: Renditezeitreihen von RWE und E.ON am 20. April 2015
+png("Ret_20042015.png",height=400,width=600)
+par(mfrow=c(2,1))
+chart.TimeSeries(rwe_ret[220:240], lwd = 1, ylab="Log-Renditen in %", xlab="Datum", main="Log-Renditen RWE 20.04.2015", legend.loc="topright", period.area="2015-04-20::2015-04-21", date.format = "")
+chart.TimeSeries(eon_ret[220:240], lwd = 1, ylab="Log-Renditen in %", xlab="Datum", main="Log-Renditen E.ON 20.04.2015", legend.loc="topright", period.area="2015-04-20::2015-04-21", date.format = "")
+dev.off()
+
+## Abbildung 11: Renditezeitreihen von RWE und E.ON am 25./26. April 2015
+png("Ret_24042015.png",height=400,width=600)
+par(mfrow=c(2,1))
+chart.TimeSeries(rwe_ret[226:246], lwd = 1, ylab="Log-Renditen in %", xlab="Datum", main="Log-Renditen RWE 25.04.2015", legend.loc="topright", period.area="2015-04-24::2015-04-27", date.format = "")
+chart.TimeSeries(eon_ret[226:246], lwd = 1, ylab="Log-Renditen in %", xlab="Datum", main="Log-Renditen E.ON 25.04.2015", legend.loc="bottomright", period.area="2015-04-24::2015-04-27", date.format = "")
+dev.off()
+
+## Abbildung 12: Renditezeitreihen von RWE und E.ON am 4.Juni 2015
+png("Ret_04062015.png",height=400,width=600)
+par(mfrow=c(2,1))
+chart.TimeSeries(rwe_ret[253:273], lwd = 1, ylab="Log-Renditen in %", xlab="Datum", main="Log-Renditen RWE 04.06.2015", legend.loc="bottomright", period.area="2015-06-03::2015-06-04", date.format = "")
+chart.TimeSeries(eon_ret[253:273], lwd = 1, ylab="Log-Renditen in %", xlab="Datum", main="Log-Renditen E.ON 04.06.2015", legend.loc="bottomright", period.area="2015-06-03::2015-06-04", date.format = "")
+dev.off()
+
+## Tabellen
+## Tabelle 2: Deskriptive Statistiken der stetigen Renditen in %
+ret_length<-cbind(length(rwe_ret),length(eon_ret))
+ret_mean<-cbind(mean(rwe_ret), mean(eon_ret))
+ret_min<-cbind(min(rwe_ret), min(eon_ret))
+ret_max<-cbind(max(rwe_ret), max(eon_ret))
+ret_sd<-cbind(sd(rwe_ret), sd(eon_ret))
+ret_skewness<-cbind(skewness(rwe_ret),skewness(eon_ret))
+ret_curtosis<-cbind(kurtosis(rwe_ret), kurtosis(eon_ret))
+ret_all<-rbind(ret_length, ret_mean, ret_min, ret_max, ret_sd, ret_skewness, ret_curtosis)
+colnames(ret_all)<-c("RWE", "E.ON")
+row.names(ret_all)<-c("N", "Mean", "Min", "Max", "St. Dev.", "Skewness", "Kurtosis")
+stargazer(ret_all,type="text", title="Decriptive Stats Log Returns", digits = 3, out = ".txt")
+
+## Tabelle 3: Augmented-Dickey-Fuller Test auf Stationarität
+rwe_adf<-cbind(adf.test(rwe_ret)$statistic, adf.test(rwe_ret)$p.value)
+eon_adf<-cbind(adf.test(eon_ret)$statistic, adf.test(eon_ret)$p.value)
+all_adf<-rbind(rwe_adf, eon_adf)
+colnames(all_adf)<-c("ADF-Test", "p-Value")
+row.names(all_adf)<-c("RWE", "E.ON")
+stargazer(all_adf ,type="text", title="Augmented Dickey-Fuller Test", digits = 3, out = ".txt")
+
+## Tabelle 4: Jarque-Bera Test auf Normalverteilung
+rwe_jb<-cbind(jarque.bera.test(rwe_ret)$statistic, jarque.bera.test(rwe_ret)$p.value)
+eon_jb<-cbind(jarque.bera.test(eon_ret)$statistic, jarque.bera.test(eon_ret)$p.value)
+all_jb<-rbind(rwe_jb, eon_jb)
+colnames(all_jb)<-c("Jarque-Bera Test", "p-Value")
+row.names(all_jb)<-c("RWE", "E.ON")
+stargazer(all_jb ,type="text", title="Jarque-Bera Test", out = ".txt")
+
+## Tabelle 5: Renditen außerhalb eines Intervalls von 3 und 4 (rot) Standardabweichungen
+q=4 # Anzahl der Standardabweichungen, die als Intervall untersucht werden sollen
+# RWE
+sdq_rwe<-q*sd(rwe_ret)
+sdqp_rwe<-which(rwe_ret > sdq_rwe)
+sdqm_rwe<-which(rwe_ret < -sdq_rwe)
+outsdq_rwe<-rbind(sdqp_rwe,sdqm_rwe)
+rwe_ret[outsdq_rwe]
+# EON
+sdq_eon<-q*sd(eon_ret)
+sdqp_eon<-which(eon_ret > sdq_eon)
+sdqm_eon<-which(eon_ret < -sdq_eon)
+outsdq_eon<-rbind(sdqp_eon,sdqm_eon)
+eon_ret[outsdq_eon]
+
+## Tabelle 6: Parameterschätzung der GARCH(1,1)-Modelle für Dax, RWE und E.ON Renditezeitreihen
+specgarch0 <- ugarchspec(variance.model=list(model="sGARCH", garchOrder=c(1,1)), mean.model=list(armaOrder=c(0,0)), distribution="norm")
+#RWE_GARCH(1,1)
+rwe_mod0<- ugarchfit(data=rwe_ret, spec=specgarch0)
+show(rwe_mod0)
+#EON_GARCH(1,1)
+eon_mod0<- ugarchfit(data=eon_ret, spec=specgarch0)
+show(eon_mod0)
+
+## Tabelle 7: Ljung-Box-Pierce-Test der geschätzten GARCH(1,1)-Modelle
+res_rwe2<-residuals(rwe_mod0, standardize=TRUE)
+res_eon2<-residuals(eon_mod0, standardize=TRUE)
+
+LjungBoxPierceTest(res_rwe2^2,3,18)
+LjungBoxPierceTest(res_eon2^2,3,18)
+
+## Tabelle 8: 
+## Ausreißererkennung nach Doornik & Ooms 2002
+# Alle-Renditen
+ret<-cbind(rwe_ret, eon_ret)
+ret<-xts(ret, order.by=as.Date.character(rwe.logs$Date, format="%Y-%m-%d"))
+# Konstanten
+T<- 414 #length(sample_data)
+Ct<- 5.66+1.88*log10(T)
+# Spezifikation Variablen
+specgarch0 <- ugarchspec()
+mod0<- ugarchfit()
+lb<-c()
+mod0.resSt<-c()
+mod0.res.abs<-c()
+a<-c()
+z<-c()
+dt<-matrix()
+dt1<-matrix()
+specgarch<-ugarchspec()
+mod<-ugarchfit()
+lm<-c()
+C<-c()
+mod.resSt<-c()
+mod.res.abs<-c()
+loc<-matrix()
+outliers<-matrix()
+critval<-c("FALSE")
+no<-c()
+k<-c()
+outliers<-c()
+outlier<-c()
+i<-1 
+# i ist der Spaltenindex für (1)RWE, (2)E.ON Renditezeitreihen in xts-Datensatz "ret"
+# Hiermit kann zwischen den renditedatensätzen unterschieden werden.
+  specgarch0 <- ugarchspec(variance.model=list(model="sGARCH", garchOrder=c(1,1)), mean.model=list(armaOrder=c(0,0)), distribution="norm")
+  mod0<- ugarchfit(data=ret[,i], spec=specgarch0)
+  lb<-likelihood(mod0)
+  mod0.resSt<-residuals(mod0, standardize=TRUE)
+  mod0.res.abs<-abs(mod0.resSt)
+  a<-which.max(mod0.res.abs)
+  dt<-matrix(0,T)
+  dt[a]<-1
+  dt1<-matrix(0,T)
+  dt1[a-1]<-1
+  bout<-0
+  while (critval == "FALSE") {
+    specgarch <- ugarchspec(variance.model=list(model="sGARCH", garchOrder=c(1,1), external.regressors= dt1), mean.model=list(armaOrder=c(0,0), external.regressors= dt), distribution="norm")
+    mod<- ugarchfit(data=ret[,i], spec=specgarch)
+    lm<-likelihood(mod)
+    C<- 2*(lm-lb)
+    critval<- C < Ct
+    if (sum(dt) != bout)
+      bout<-sum(dt)
+    else
+      break
+    # Schritt 4
+    ym<-mod@fit$coef["mxreg1"]
+    tm<-mod@fit$coef["vxreg1"]
+    a1 <- mod@fit$coef["alpha1"]
+    ts1<-ret[,i]-(dt*ym)
+    mod1<- ugarchfit(data=ts1, spec=specgarch0)
+    l0<-likelihood(mod1)
+    stef<-ym^2-(tm/a1)
+    if (stef <= 0) { y1<-0 } else 
+      if (ym >= 0) {y1 <- ym-stef^0.5} else {y1 <- ym+stef^0.5}
+    ts2<-ret[,i]-dt*y1
+    mod2<- ugarchfit(data=ts2, spec=specgarch0)
+    l1<-likelihood(mod2)
+    if (l0 >= l1){
+      y2<-ym
+      l2<-l0
+    } else {
+      y2<-y1
+      l2<-l1
+    }
+    print(lm-l2)
+    # Schritt 5
+    if (2*(lm-l2) <= 3.84){type<-c("ALO",y2)} else{type<-c("AVO",ym)}
+    outlier<-cbind(rwe.date[a],type[1], type[2])
+    outliers<-rbind(outliers, outlier)
+    mod.resSt<-residuals(mod, standardize=TRUE)
+    mod.res.abs<-abs(mod.resSt)
+    a<-which.max(mod.res.abs)
+    dt[a]<-1
+    dt1[a-1]<-1
+  }
+  colnames(outliers)<-c("Datum", "Typ", "Einfluss")
+  print(outliers)

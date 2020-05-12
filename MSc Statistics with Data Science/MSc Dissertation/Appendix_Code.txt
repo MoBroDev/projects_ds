@@ -1,0 +1,2244 @@
+# Libraries
+import numpy as np
+import pandas as pd
+import scipy as sp
+import csv 
+import os
+import datetime
+import math
+import holidays 
+from datetime import date
+
+# Modelling
+from scipy.optimize import nnls 
+from scipy import stats
+import statsmodels.api as sm
+from statsmodels.api import OLS
+from statsmodels.tsa.stattools import acf, pacf
+from sklearn import metrics
+import scipy.fftpack
+from sklearn.metrics import r2_score
+from sklearn.metrics import mean_squared_error
+
+# Plots
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+
+import matplotlib.dates as mdates
+
+#%% Directories
+# Graphs
+path_graphs = ''
+
+# Client-Data
+path_rawfolder = ''
+# Google-Data
+LocalSave = ''
+ 
+# Functions
+########## Data Preparation ##########
+def removelowTVresponse(dataframe,metriCol):
+    """
+    Function to remove initial and final dates with no/very low TV 
+    attributed responses.
+    - Does **not** remove intermediate dates (that is natural in 
+    campaign-based clients)
+    - Should work on the **weekly** dataset
+    
+    Input:
+    dataframe: pandas dataframe
+    metriCol: column name of the time serie with web response
+    
+    Output:
+    Filtered dataframe        
+    """
+    removeleadingzeros = True
+    removetrailingzeros = True 
+    
+    meanval = np.mean(dataframe[metriCol])
+    boundary = meanval/15 
+    
+    dataframe['lowresponseindicator'] = np.where(dataframe[metriCol] > boundary, 1, np.NaN)
+    beg = dataframe['lowresponseindicator'].first_valid_index()
+    end = dataframe['lowresponseindicator'].last_valid_index()
+    
+    if removeleadingzeros:
+        if beg != None:
+            dataframe = dataframe.loc[beg:,:]
+    if removetrailingzeros:
+        if end != None:
+            dataframe = dataframe.loc[:end,:]
+    dataframe = dataframe.drop(['lowresponseindicator'], axis = 1)
+    
+    return dataframe
+
+def removelowwebresponse(dataframe,metricCol):
+    """
+    Function to remove initial and final dates with no/very low web responses.
+    - Does **not** remove intermediate dates
+    - Should work on the **weekly** dataset
+    
+    Input:
+    dataframe: pandas dataframe
+    metriCol: column name of the time serie with web response
+    
+    Output:
+    Filtered dataframe
+    """
+    meanval = np.mean(dataframe[metricCol])
+    boundary = meanval/15
+    
+    dataframe['lowresponseindicator'] = np.where(dataframe[metricCol] > boundary, 1, np.NaN)
+    beg = dataframe['lowresponseindicator'].first_valid_index()
+    end = dataframe['lowresponseindicator'].last_valid_index()
+    
+    if beg != None and end != None:
+        dataframe = dataframe.loc[beg:end,:]
+    dataframe = dataframe.drop(['lowresponseindicator'], axis=1)
+    
+    return dataframe
+
+def preparingClient(clientFileName, rawfolder):
+    '''
+    Main function to obtain weekly data from the initial daily data:
+    1. Read the raw data
+    2. Extract and aggregate relevant time series
+    3. Aggregate from daily to weekly data (weeks starting on Sunday to match Google Trends later)
+    4. Removing weeks with no/low TV attributed responses at the start and end of the dataset
+    5. Removing weeks with no/low web responses at the start and end of the dataset
+    
+    Input: 
+    clientFileName: client filename
+    
+    Output:
+    dataframe aggregated at daily level with the initial relevant information for later modelling
+    '''    
+    columns=['date', 
+             'TV_attributedresponse', 
+             'all_webresponse', 
+             'unattributedresponse', 
+             'all_webresponse_onlyweb',
+             'clientid', 
+             'clientname',
+             'tv.spend',
+             'tv.audience',
+             'allresponse_outofscope']
+
+    tempdaily_df = pd.DataFrame(columns=columns)
+    clientdf = pd.read_csv(rawfolder + clientFileName + '.csv')
+    
+    # Now extract the relevant columns from the dataset and sum them
+    TV_attributedresponse_cols = []
+    all_webresponse_cols = []
+    allsearchanddirect_cols = []
+    all_webresponse_mediumweb_cols = []
+    TV_spend_cols = []
+    TV_audience_cols = []
+    all_outofscope_cols = []
+
+    for col in clientdf.columns:
+        if 'tv' in col and '.dr.' in col and 'all' not in col:
+            TV_attributedresponse_cols.append(col)
+        if ('direct' in col or 'search' in col) and 'allresponse' in col:
+            allsearchanddirect_cols.append(col)
+        if 'allresponse' in col and 'outofscope' not in col:
+            all_webresponse_cols.append(col)
+        if 'allresponse' in col and 'outofscope' not in col and col.startswith('web'):
+            all_webresponse_mediumweb_cols.append(col)
+        if 'tv.spend' in col:
+            TV_spend_cols.append(col)
+        if 'tv.audience' in col:
+            TV_audience_cols.append(col)
+        if 'allresponse' in col and 'outofscope' in col:
+            all_outofscope_cols.append(col)
+    
+    # Sum across columns
+    tempdaily_df['date']=clientdf['day']
+    tempdaily_df['TV_attributedresponse'] = clientdf[TV_attributedresponse_cols].sum(axis=1) #sum across relevant columns
+    tempdaily_df['all_webresponse'] = clientdf[all_webresponse_cols].sum(axis=1) #sum across relevant columns
+    tempdaily_df['unattributedresponse'] = tempdaily_df['all_webresponse'] - tempdaily_df['TV_attributedresponse']
+    tempdaily_df['all_searchanddirect'] = clientdf[allsearchanddirect_cols].sum(axis=1) #sum across relevant columns
+    tempdaily_df['all_webresponse_onlyweb'] = clientdf[all_webresponse_mediumweb_cols].sum(axis=1) #sum across relevant columns
+    tempdaily_df['TV_spend'] = clientdf[TV_spend_cols].sum(axis=1)
+    tempdaily_df['TV_audience'] = clientdf[TV_audience_cols].sum(axis=1)
+    tempdaily_df['outofscope'] = clientdf[all_outofscope_cols].sum(axis=1)
+
+    # Remove leading and trailing zero web responses
+    tempdaily_df = removelowwebresponse(tempdaily_df,'all_webresponse')
+    tempdaily_df = removelowTVresponse(tempdaily_df,'TV_attributedresponse')
+        
+    columns_of_interest = ['TV_attributedresponse',
+                           'all_webresponse',
+                           'all_searchanddirect',
+                           'all_webresponse_onlyweb',
+                           'TV_spend'
+                           ]    
+   
+    # convert date into datetime index
+    tempdaily_df['date'] = pd.to_datetime(tempdaily_df['date'])
+    tempdaily_df = tempdaily_df.set_index(pd.DatetimeIndex(tempdaily_df['date']))
+    
+    tempdaily_df = tempdaily_df[columns_of_interest]
+    
+    return tempdaily_df
+
+def GoogleTrends(client, LocalSave): 
+    '''
+    Function to 
+    - read the Google Trends data for client
+    - rescale the metric column to first datapoint in dataset
+    
+    Input:
+    client - client name
+    LocalSave - folder path where data is stored
+    
+    Output:
+    google_df - dataframe with Google Trends original & rescaled
+    '''
+    google_df1 = pd.read_csv(LocalSave+'GT_Daily_'+client+'_1.csv', skiprows=2)
+    google_df2 = pd.read_csv(LocalSave+'GT_Daily_'+client+'_2.csv', skiprows=2)
+    google_df3 = pd.read_csv(LocalSave+'GT_Daily_'+client+'_3.csv', skiprows=2)
+    google_df4 = pd.read_csv(LocalSave+'GT_Daily_'+client+'_4.csv', skiprows=2)
+    google_df5 = pd.read_csv(LocalSave+'GT_Daily_'+client+'_5.csv', skiprows=2)
+    google_df6 = pd.read_csv(LocalSave+'GT_Daily_'+client+'_6.csv', skiprows=2)
+    
+    # create list of data frames 
+    gt_rescaled =[]
+    google_df_list = [google_df1, google_df2, google_df3, google_df4, google_df5, google_df6]
+    
+    # ste last value by definition to the first that we have. The series
+    # will be normalised by this number.
+    last_in_series = google_df1.iloc[0][1]
+    
+    for df in google_df_list:
+        df.columns = ['date','gt_raw']
+        # get first value from current series
+        first_val = df['gt_raw'].iloc[0]
+        for value in df['gt_raw']:
+            # calculate return, i.e. relative increase to last value in previous series
+            # which by default is the first value in the current one
+            increase_to_now = value/first_val 
+            # multiply the initial value with the relative increase to get value
+            # the value is appended and stored in the long series
+            new_val = last_in_series*increase_to_now
+            gt_rescaled.append(new_val)
+        # save the last value and remove it. This is necessary in order to not 
+        # have duplicates. Note that this date comes back in the next series. 
+        # the increase calculated will be 1 in the first instance and since we 
+        # have stored the correct value we will include it in the next loop
+        last_in_series = gt_rescaled[-1]
+        del gt_rescaled[-1]
+    
+    # there was no new loop for the last case. Append removed value again.
+    gt_rescaled.append(last_in_series) 
+    
+    # drop first value of 2nd to 6th data frame  
+    google_df1.drop(google_df1.tail(1).index,inplace=True)
+    google_df2.drop(google_df2.tail(1).index,inplace=True) 
+    google_df3.drop(google_df3.tail(1).index,inplace=True)
+    google_df4.drop(google_df4.tail(1).index,inplace=True)
+    google_df5.drop(google_df5.tail(1).index,inplace=True)
+    
+    google_df = pd.concat(google_df_list)
+    
+    google_df['gt_rescaled'] = gt_rescaled
+    # convert date into datetime index
+    google_df['date'] = pd.to_datetime(google_df['date'])
+    google_df = google_df.set_index(pd.DatetimeIndex(google_df['date']))
+    google_df = google_df.drop('date', axis=1)
+
+    return google_df
+
+
+########## Seasonality Analysis ##########
+def getLinearFit(dataframe,metricCol):
+    """
+    Simple linear fit to metricCol - used to detrend the Google Trend before 
+    computing the seasonality index
+    Input:
+        dataframe: pandas dataframe
+        metricCol: time serie to be fitted
+    Output:
+        line: array with the linear fit to metricCol
+    """
+    x = range(len(dataframe[metricCol]))
+    y = dataframe[metricCol]
+    x=np.asarray(x)
+    y=np.asarray(y)
+    linear_trend = np.polyfit(x, y, deg=1)
+    line =linear_trend[0]* x + linear_trend[1]
+    return line
+
+def train_model_dummy_day(dataframe, feature_of_interest):
+    ''' 
+    Function to create a seasonal index based on an OLS model 
+    with dummy variables for each day of the week
+    
+    Input:
+    dataframe - dataframe - cleaned client data with scaled feature of interest
+    feature_of_interest - string - column name for column of interest  
+    
+    Output:
+    coefs, pvalues - tuple - coefficients and pvalues for each dummy variable
+    '''
+    # Dummy Variables
+    daysColumns = ['Monday', 
+                   'Tuesday',
+                   'Wednesday',
+                   'Thursday', 
+                   'Friday', 
+                   'Saturday', 
+                   'Sunday']
+    
+    temp = dataframe.copy(deep=True)
+    # Detrend
+    fit = getLinearFit(temp,feature_of_interest)
+    detrended = temp[feature_of_interest] - fit
+    temp[feature_of_interest] = detrended + np.absolute(detrended.min())
+    
+    # Daily pattern with daily dummies
+    temp = temp.join(pd.get_dummies(pd.DatetimeIndex(temp.index).
+                                    get_level_values(0).weekday_name).
+                                    set_index(temp.index).
+                                    reindex(columns=daysColumns, fill_value=0))                           
+    
+    explanatorycols = [x for x in temp if x in daysColumns]
+        
+    linreg  = OLS(temp[feature_of_interest], temp[explanatorycols])
+    results = linreg.fit()
+    #results.summary()
+    coefs   = results.params
+    #tvalues = results.tvalues
+    pvalues = results.pvalues
+    r2 = results.rsquared
+    
+    return coefs, pvalues, r2
+    
+def model_dummy_day(dataframe, coefs, pvalues, pvalueboundary=0.05):
+    '''
+    Function to create a seasonal index with the seasonal indicator of 
+    the dummy-day-model based on the given coefficients 
+    and pvalues 
+    
+    Input:
+    dataframe - dataframe to add seasonal index to
+    coefs - coefficients of trained dummy-day model
+    pvalues - pvalues of trained dummy-day model
+    pvalueboundary - significance boundary to accept coefficients
+    
+    Output:
+    dataframe - input dataframe with added seasonal index as column
+    '''
+    temp = dataframe.copy(deep=True)
+
+    # Dummy Variables
+    daysColumns = ['Monday', 
+                   'Tuesday',
+                   'Wednesday',
+                   'Thursday', 
+                   'Friday', 
+                   'Saturday',
+                   'Sunday']
+    
+    temp = temp.join(pd.get_dummies(pd.DatetimeIndex(temp.index).
+                                    get_level_values(0).weekday_name).
+                                    set_index(temp.index).
+                                    reindex(columns=daysColumns, fill_value=0))                           
+    
+    # Returns and array with the daily pattern in the whole data range 
+    # which will be the future time series in the model
+    dailypattern = 0
+    for weekdays in daysColumns:
+        if pvalues[weekdays]<= pvalueboundary:
+            dailypattern = dailypattern + coefs[weekdays] * temp[weekdays]
+    
+    # Daily pattern
+    dataframe['seasonal_dummy_day'] = dailypattern
+    return dataframe
+
+
+# Model: Day-Holiday-Dummy
+def train_model_dummy_day_holiday(dataframe, client_country, feature_of_interest):
+    ''' 
+    Function to create a seasonal index based on an OLS model 
+    with dummy variables for each day of the week and specific holidays 
+    based on the country of the client
+    
+    Input:
+    dataframe - dataframe - cleaned client data with scaled feature of interest
+    feature_of_interest - string - column name for column of interest  
+    
+    Output:
+    coefs - coefficients for each dummy variable used in the model
+    pvalues - pvalues for each dummy variable used in the model
+    client_holidays - client holidays used when running the OLS model
+    '''
+    # create training data set
+    temp = dataframe.copy(deep=True)
+    # Detrend
+    fit = getLinearFit(temp,feature_of_interest)
+    detrended = temp[feature_of_interest] - fit
+    temp[feature_of_interest] = detrended + np.absolute(detrended.min())
+    
+    ## Dummy Variables
+    # day dummies
+    daysColumns = ['Monday', 
+                   'Tuesday', 
+                   'Wednesday',
+                   'Thursday', 
+                   'Friday', 
+                   'Saturday',
+                   'Sunday']
+    temp = temp.join(pd.get_dummies(pd.DatetimeIndex(temp.index).
+                                    get_level_values(0).weekday_name).
+                                    set_index(temp.index).
+                                    reindex(columns=daysColumns, fill_value=0))
+    
+    # get client holidays
+    client_holidays = holidays.CountryHoliday(client_country)
+    # holiday dummies
+    for holiday in temp.index:
+        if holiday in client_holidays:
+            temp.loc[holiday, 'Holidays'] = client_holidays[holiday]
+    if 'Holidays' in temp.columns:
+        temp = temp.join(pd.get_dummies(temp['Holidays']))
+     
+        Holidays = temp['Holidays'].unique().tolist()
+        holidaysColumns = [x for x in Holidays if str(x) != 'nan']
+    
+        # list of dummies
+        dummyColumns = daysColumns + holidaysColumns
+    
+        temp = temp.drop('Holidays', axis=1) 
+    else:
+        dummyColumns = daysColumns
+    explanatorycols = [x for x in temp if x in dummyColumns]
+        
+    linreg  = OLS(temp[feature_of_interest], temp[explanatorycols])
+    
+    results = linreg.fit()
+    coefs   = results.params
+    #tvalues = results.tvalues
+    pvalues = results.pvalues
+    r2 = results.rsquared
+    
+    return coefs, pvalues, client_holidays, r2
+
+def model_dummy_day_holiday(dataframe, coefs, pvalues, client_holidays, pvalueboundary=0.05): 
+    '''
+    Function to create a seasonal index with the seasonal indicator of the
+    dummy-day-holiday-model based 
+    on the given coefficients and pvalues 
+    
+    Input:
+    dataframe - dataframe to add seasonal index to
+    client_country - string with name of client country from client list
+    client_holidays - client holdays from the trianed data
+    coefs - coefficients of trained dummy-day-holiday model
+    pvalues - pvalues of trained dummy-day-holiday model
+    pvalueboundary - significance boundary to accept coefficients
+    
+    Output:
+    dataframe - input dataframe with added seasonal index as column
+    '''
+    temp = dataframe.copy(deep=True)
+    
+    ## Dummy Variables   
+    # day dummies
+    daysColumns = ['Monday', 
+                   'Tuesday',
+                   'Wednesday', 
+                   'Thursday',
+                   'Friday', 
+                   'Saturday',
+                   'Sunday']
+    temp = temp.join(pd.get_dummies(pd.DatetimeIndex(temp.index).
+                                    get_level_values(0).weekday_name).
+                                    set_index(temp.index).
+                                    reindex(columns=daysColumns, fill_value=0))
+    
+    dailypattern = 0
+    for weekdays in daysColumns:
+        if pvalues[weekdays]<= pvalueboundary:
+            dailypattern = dailypattern + coefs[weekdays] * temp[weekdays]
+    # holiday dummies
+    for holiday in temp.index:
+        if holiday in client_holidays:
+            temp.loc[holiday, 'Holidays'] = client_holidays[holiday]
+    if 'Holidays' in temp.columns:
+        temp = temp.join(pd.get_dummies(temp['Holidays']))
+     
+        Holidays = temp['Holidays'].unique().tolist()
+        holidaysColumns = [x for x in Holidays if str(x) != 'nan' and str(x) in coefs.index]
+        for holiday in holidaysColumns:
+            if pvalues[holiday] <= pvalueboundary:
+                dailypattern = dailypattern + coefs[holiday] * temp[holiday]
+     
+    
+    # Daily pattern
+    dataframe['seasonal_dummy_day_holiday'] = dailypattern
+    
+    return dataframe
+
+# Fourier Transformation Prep
+def train_model_fourier(dataframe, feature_of_interest, threshold=0.01):
+    '''
+    Function to transform, alter and re-transform the altered signal via 
+    Fourier transformation
+    
+    Input:
+    dataframe - dataframe to be used to train fourier seasonal index on
+    feature_of_interest - string with column name for column of interest
+    threshold - threshold percentage for variance threshold of fourier alteration
+    
+    Output:
+    signal_invert - inverted signal altered by variance threshold
+    '''  
+    signal_org = dataframe[feature_of_interest]
+    signal_mean = signal_org.mean()
+    signal = signal_org-signal_mean
+    
+    # 2. compute fft of signal data
+    signal_fft = sp.fftpack.fft(signal)
+   
+    # 3. compute power spectral density
+    signal_psd = np.abs(signal_fft) ** 2
+    
+    # 4. get frequencies corresponding to fft values
+    signal_fftfreq = sp.fftpack.fftfreq(len(signal_psd), 1. / (2*np.pi))
+     
+    # 5. Treshold for signal_fft
+    # only frequencies that are individually at least threshold % of variance
+    signal_fft_thresh = signal_fft
+    signal_fft_thresh[signal_psd < threshold*sum(signal_psd)] = 0 
+    
+    # compute power spectral densities based on thresholded signal_fft        
+    signal_psd_thresh = np.abs(signal_fft_thresh)**2
+    #print('-----\n'+client+'\nexplained variance='+str(sum(signal_psd_thresh)/sum(signal_psd)))
+    # Inversion of frequency to time series
+    signal_invert = pd.DataFrame(np.real(sp.fftpack.ifft(signal_fft_thresh))+signal_mean)
+    signal_invert = signal_invert.set_index(pd.DatetimeIndex(dataframe.index))
+    
+    return signal_invert, signal_psd, signal_psd_thresh, signal_fftfreq
+
+def model_fourier(dataframe, invert_signal):
+    '''
+    Function to create a seasonal index based on the given inverted signal
+    
+    Input:
+    dataframe - input dataframe to create seasonal index column
+    invert_signal - inverted signal from 'train_model_fourier'
+    
+    Output:
+    dataframe - output dataframe with seasonal index column
+    '''
+    dailypattern =[]
+    for i, index in enumerate(dataframe.index):
+        delta_t = (dataframe.index[i] - invert_signal.index[0]).days
+        modulo = delta_t % invert_signal.shape[0]
+        if modulo == 0:
+            dailypattern.append(float(invert_signal.iloc[-1]))
+        else:
+            dailypattern.append(float(invert_signal.iloc[modulo]))
+    dataframe['seasonal_fourier'] = dailypattern
+    return dataframe
+
+########## Modelling ##########
+def createSavitzkyGolayTrend(dataframe, metricCol, windowLength=15, polyOrder=1):
+    """
+    Function to compute the global trend of the target using a Savitzky-Golay 
+    filter of windowLength days and
+    to create a normalized series
+    
+    Input:
+    dataframe - inut dataframe with metric column
+    metrics - metric column to compute Savitzky-Golay filter on
+    windowlength - length of moving average within Savitzky-Golay filter
+    ployOrder - 
+    
+    Output:
+    
+    
+    """    
+    filter_series = scipy.signal.savgol_filter(dataframe[metricCol], 
+                                               window_length=windowLength,
+                                               polyorder=polyOrder)
+    dataframe['shape_SG'] = (filter_series - np.min(filter_series) + 1)/filter_series.mean()
+
+def applyLimitedAdstock(metricTV, adstockValue, maxDuration=12): 
+    """
+    Input:
+    value: adstock value we will apply
+    maxDuration: number of weeks that we allow the TV to have an impact 
+                (for being in python we start counting on 0 -current week- and 
+                 need to add +1 to have the correct duration of the adstock)
+    Output:
+    adstocked = sum(value^l * TV(t-l)) where l is the number of the previous 
+    weeks - geometrical series
+    """
+    maxDuration = maxDuration+1    
+    tsvec = np.asarray(metricTV)    
+    adstocked = np.zeros_like(tsvec)         
+    
+    for i in np.arange(len(tsvec)): 
+        adstocked[i] =0
+        for n in np.arange(1,maxDuration+1):
+            adstocked[i] += adstockValue**(n-1) * tsvec[i-(n-1)]
+    return adstocked
+
+def createAdstockSeries(dataframe, TVserie, adstocklist):
+    """
+    This funcion creates a collection of time series with a range of adstocks 
+    over the TV time serie 
+    Input:
+        dataframe: pandas dataframe
+        TVserie: TV time serie to use -TV attributed response for now
+        adstockList: list of adstock values to be test in the model
+        typeAdstock: 
+    Output:
+        dataframe including the adstocked time series
+    """
+    for adstock in adstocklist:
+        dataframe['alltv.response.ad'+str(round(adstock,2))] = applyLimitedAdstock(dataframe[TVserie], adstock)
+
+def holiday_dummy(dataframe, target, client_country, pvalueboundary):
+    '''
+    Function to create index column in given dataframe based on holidays in 
+    client_country using OLS
+    
+    Input:
+    dataframe - input dataframe to create indicator column in 
+    target - target column used as dependent variable for OLS
+    client_country - client country to look up holidays
+    pvalueboundary - boundary for OLS coefficient p-values to select significant index
+    
+    Output:
+    dtaframe - output dataframe with holiday index column
+    '''
+    temp = dataframe.copy(deep=True)
+
+    # get client holidays
+    client_holidays = holidays.CountryHoliday(client_country)
+    # holiday dummies
+    for holiday in temp.index:
+        if holiday in client_holidays:
+            temp.loc[holiday, 'Holidays'] = client_holidays[holiday]
+    temp = temp.join(pd.get_dummies(temp['Holidays']))
+    Holidays = temp['Holidays'].unique().tolist()
+    holidaysColumns = [x for x in Holidays if str(x) != 'nan']
+    temp = temp.drop('Holidays', axis=1)
+    
+    linreg  = OLS(temp[target], temp[holidaysColumns])
+    
+    results = linreg.fit()
+    coefs   = results.params
+    #tvalues = results.tvalues
+    pvalues = results.pvalues
+    
+    dailypattern = 0
+    for holiday in holidaysColumns:
+        if pvalues[holiday] <= pvalueboundary:
+            dailypattern = dailypattern + coefs[holiday] * temp[holiday]
+     
+    # Daily pattern
+    dataframe['holiday_var'] = dailypattern
+
+def createDataset_forModelling(dataframe, clientFileName, TVSerie,
+                               client_country, target, seasonType,
+                               trendType, trained_data, adstocklist, 
+                               windowLength, pvalueboundary=0.05):
+    """
+    Main function to create the final dataset used for modelling:
+    1.  create seasonality index
+    2.  create adstock series
+    3.0 create linear trend
+    3.1 create Savitzky-Golay trend
+    4.  add positive constant
+    5.  create holiday indicator index
+    
+    Input:
+    dataframe - dataframe to use for the model
+    clientFileName - name of client
+    TVSerie - metric series with attributed TV responses
+    client_country - name of client country
+    target - target variable
+    seasonType - seasonality type: 'seasonal_fourier', 'seasonal_dummy_day', 
+    'seasonal_dummy_day_holiday'
+    trained_data - data from the trained_ functions
+    adstockList - list of adstock values to be tested in the model
+    windowLength - length of moving average window of Savitzky-Golay filter
+    pvalueboundary - boundary for p-values of OLS coefficients
+    
+    Output:
+    dataframe including the new time series and ready for modelling
+    """
+    # 1. Seasonality: 
+    if seasonType == 'seasonal_fourier':
+        dataframe = model_fourier(dataframe=dataframe, 
+                                  invert_signal=trained_data[0])
+    elif seasonType == 'seasonal_dummy_day':
+        dataframe = model_dummy_day(dataframe=dataframe, 
+                                    coefs=trained_data[0], 
+                                    pvalues=trained_data[1], pvalueboundary=0.05)
+    elif seasonType == 'seasonal_dummy_day_holiday':
+        dataframe = model_dummy_day_holiday(dataframe=dataframe, 
+                                            coefs=trained_data[0], 
+                                            pvalues=trained_data[1], 
+                                            client_holidays=trained_data[2],
+                                            pvalueboundary=0.05)
+        
+    # 2. Adstock series
+    createAdstockSeries(dataframe, TVSerie, adstocklist)
+
+    # 3.0. Linear variable for modelling
+    if trendType == 'shape_Lin':
+        dataframe['shape_Lin'] = getLinearFit(dataframe,metricCol=target)
+    elif trendType == 'shape_SG':
+        createSavitzkyGolayTrend(dataframe, target, windowLength)
+    
+    # 4. Positive constant for fitting
+    dataframe['positive.constant'] = 1
+    
+    # 5. Create holiday indicator index
+    holiday_dummy(dataframe, target, client_country, pvalueboundary)
+    
+    return dataframe
+
+def runModelling(dataframe, client, client_country, adstocklist, 
+                 target, seasonality_variable, trend_variable, models):
+    '''
+    Function to estimate global model in the following steps
+    1. Preparation of explanatory variables
+    2. Run non-negative least squares model to select variables with positive coefficients
+    3. Run OLS model with selected explanatory variables
+    4. store OLS metrics
+    
+    Input:
+    dataframe - dataframe ready for modelling
+    client - name of client
+    client_country - name of client country
+    adstocklist - list of adstock values to model with
+    target - target used as dependent variable in OLS model
+    seasonality_variable - name of seasonality variable in dataframe
+    trend_variable - name of trend variable in dataframe
+    models - model name indicating model specification
+    
+    Output:
+    df_ols_results - dataframe containing metrics for OLS model for each 
+    adstock value in adstocklist
+    '''
+    # 1) Prepare explanatory variables for model
+    common_variables = ['positive.constant']
+    df_ols_results = pd.DataFrame()
+    
+    for adstock in adstocklist:
+        for model in models:
+            if 'fullmodelholiday' in model:
+                explanatory_variables = common_variables + ['alltv.response.ad' + str(round(adstock,2)), 
+                                                            seasonality_variable, 
+                                                            trend_variable, 'holiday_var']
+                model_name = models[0]+'_ad'+str(round(adstock,2))+'_'+seasonality_variable+'_'+trend_variable+'_holiday'
+            elif 'fullmodel' in model:
+                explanatory_variables = common_variables + ['alltv.response.ad' + str(round(adstock,2)),
+                                                            trend_variable, 
+                                                            seasonality_variable]
+                model_name = models[0]+'_ad'+str(round(adstock,2))+'_'+seasonality_variable+'_'+trend_variable
+    # 2) Run NNLS, select positive coefficient 
+        x = np.asmatrix(dataframe[explanatory_variables])   
+        y = np.asarray(dataframe[target])
+
+        nnl_results, residuals = nnls(x, y)
+
+        variables_to_ols = []        
+        for v, variable in enumerate(explanatory_variables):
+            if nnl_results[v] != 0:
+                variables_to_ols.append(variable)       
+    # 3) Run OLS with positive coefficient covariate
+        linreg = OLS(dataframe[target], dataframe[variables_to_ols])
+        ols_results = linreg.fit()
+
+    # 4) Store results in dict
+        
+        temp_dict = {}
+        
+        for model in models:
+            temp_dict.update({'client':client, 
+                              'TVADvantage contrib':round((dataframe['TV_attributedresponse'].replace(0,np.NaN)/dataframe[target]).mean()*100,2), 
+                              'TV coverage':round(float(len(dataframe['TV_attributedresponse'].to_numpy().nonzero()[0]))/float(len(dataframe[target].to_numpy().nonzero()[0]))*100,2), 
+                              'sum(TV responses)':dataframe['TV_attributedresponse'].replace(0,np.NaN).sum(), 
+                              'sum(TV spend)':dataframe['TV_spend'].replace(0,np.NaN).sum(),
+                              'model':model_name,
+                              'adstock':adstock,
+                              model + '.aic':ols_results.aic,
+                              model + '.bic':ols_results.bic,
+                              model + '.r2':ols_results.rsquared,
+                              model + '.TV-coeff':0.0, model + '.TV-tvalue':0.0, model + '.TV-pvalue':99.99, model + '.TV-contrib':0.0, model + '.TV-factor':0.0,
+                              model + '.S-coeff':0.0, model + '.S-tvalue':0.0,model + '.S-pvalue':99.99,model + '.S-contrib':0.0,
+                              model + '.T-coeff':0.0,model + '.T-tvalue':0.0,model + '.T-pvalue':99.99,model + '.T-contrib':0.0,
+                              model + '.Constant':0.0,model + '.Constant-tvalue':0.0,model + '.Constant-pvalue':99.99,model + '.Constant-contrib':0.0,
+                              model + '.holiday_var-coeff':0.0,model + '.holiday_var-tvalue':0.0,model + '.holiday_var-pvalue':99.99,model + '.holiday_var-contrib':0.0})
+            for var in variables_to_ols:
+                if 'alltv.response' in var:
+                    temp_dict.update({model + '.TV-coeff':ols_results.params[var],
+                                      model + '.TV-tvalue':ols_results.tvalues[var],
+                                      model + '.TV-pvalue':ols_results.pvalues[var],
+                                      model + '.TV-contrib':100.*ols_results.params[var]*dataframe[var].sum()/dataframe[target].sum(),
+                                      model + '.TV-factor':ols_results.params[var]/(1-adstock)})
+                if 'season' in var:
+                    temp_dict.update({model + '.S-coeff':ols_results.params[var],
+                                      model + '.S-tvalue':ols_results.tvalues[var],
+                                      model + '.S-pvalue':ols_results.pvalues[var],
+                                      model + '.S-contrib':100.*ols_results.params[var]*dataframe[var].sum()/dataframe[target].sum()})
+                if 'shape' in var:
+                    temp_dict.update({model + '.T-coeff':ols_results.params[var],
+                                      model + '.T-tvalue':ols_results.tvalues[var],
+                                      model + '.T-pvalue':ols_results.pvalues[var],
+                                      model + '.T-contrib':100.*ols_results.params[var]*dataframe[var].sum()/dataframe[target].sum()})
+                if 'constant' in var:
+                    temp_dict.update({model + '.Constant':ols_results.params[var],
+                                      model + '.Constant-tvalue':ols_results.tvalues[var],
+                                      model + '.Constant-pvalue':ols_results.pvalues[var],
+                                      model + '.Constant-contrib':100.*ols_results.params[var]*dataframe[var].sum()/dataframe[target].sum()})
+                if 'holiday_var' in var:
+                    temp_dict.update({model + '.holiday_var-coeff':ols_results.params[var],
+                                      model + '.holiday_var-tvalue':ols_results.tvalues[var],
+                                      model + '.holiday_var-pvalue':ols_results.pvalues[var],
+                                      model + '.holiday_var-contrib':100.*ols_results.params[var]*dataframe[var].sum()/dataframe[target].sum()})
+        
+        df_ols_results = df_ols_results.append(temp_dict, ignore_index=True)
+        
+    return df_ols_results
+
+########## Model Selection ##########
+def bestModel(dataframe, modelToSave, targetCol, TVSerie, overall_confidence):
+    """
+    Function to select the 'best' model among all possible solutions:  
+    1. Select models with any of the TV series being significant (>tv_threshold)
+    2. r2 > r2_threshold
+    3. IQR for the TV factor < interquartile_threshold to avoid 'spread' solutions in the TV factor
+    4. Spread in the r2
+     
+    NOTE: The interquartile range (IQR) is the difference between the 75th and 25th percentile of the data. 
+    It is a measure of the dispersion similar to standard deviation or variance, but is much more robust 
+    against outliers.
+    
+    Input:
+    dataframe: pandas dataframe
+    modelToSave: justTV, TVandTrend, TVandSeasonality, normalModel, interactingTV
+    targetCol: target used in the model, mainly all_searchanddirect or unattributedresponse
+    TVSerie: TV time serie used in the model -TV attributed response 
+    
+    Output:
+    dataframe with selected model following the previous rules
+    """
+        
+    # Thresholds:
+    r2_threshold = 0.40
+    r2_test_threshold = 0.05
+    tv_threshold = 2.0
+    tv_pthreshold = 0.05
+    TV_interquartile_threshold = 5.0 
+    
+    columns_tosave = ['Client','TV ADvantage','spend/TVresponses', 'TV coverage', 
+               'Model', 'r2', 'aic', 'bic', 'Adstock', 
+               'TV-factor',
+               'TV-coeff', 'TV-contrib', 'TV-tvalue',
+               'Seasonality-coeff', 'Seasonality-contrib', 'Seasonality-tvalue',
+               'Trend-coeff', 'Trend-contrib', 'Trend-tvalue',
+               'holiday_var-coeff', 'holiday_var-contrib', 'holiday_var-tvalue',
+               'Constant', 'Constant-contrib', 'Total-contrib', 'Comment', 'Confidence']
+            
+    tosave = []    
+    goodtogo = False
+
+    # Global info:
+    temp_client = dataframe['client'][0]
+    temp_TVAdvantage = dataframe['TVADvantage contrib'][0]
+    temp_TVcoverage = dataframe['TV coverage'][0]
+    temp_TVresponses = float(dataframe['sum(TV responses)'][0])
+    temp_TVspend = round(float(dataframe['sum(TV spend)'][0]),2)
+    temp_ration_spend_TVresponses = round(temp_TVspend/temp_TVresponses,2)
+
+    # Total contributions to the model
+    add_contribs = [modelToSave+'.TV-contrib',
+                    modelToSave+'.T-contrib', 
+                    modelToSave+'.S-contrib', 
+                    modelToSave+'.holiday_var-contrib', 
+                    modelToSave+'.Constant-contrib']       
+    dataframe['total-contrib'] = dataframe[add_contribs].sum(axis=1)
+    nmodels = dataframe.shape[0]
+
+    # 1.- Significant TV?
+    dataframe = dataframe.loc[dataframe[modelToSave + '.TV-tvalue'] > tv_threshold]
+    if dataframe.shape[0] < nmodels:
+        reason = 'TV tvalue <'+ str(tv_threshold)
+        nmodels = dataframe.shape[0]
+
+    # Do we have models to check yet?
+    if not dataframe.empty:
+        # Maximum r2:
+        best_index = dataframe[modelToSave + '.r2'].idxmax() # we select the model with highest r2 here
+
+        # 2.- Reject models with best r2 < 0.4 - this means there is no acceptable fit
+        if dataframe[modelToSave + '.r2'][best_index] < r2_threshold: 
+            reason = 'r2='+str(round(dataframe[modelToSave + '.r2'][best_index],2))
+        else:  
+            # 3.- How constant/spread is the r2 and TV factor among the remaining models
+            # TV factor: checking IQR
+            TV_interquartile = 10 # huge initial value to pass the threshold in case we do not have enough models to do this check
+            if nmodels > 3: 
+                TV_interquartile = scipy.stats.iqr(dataframe[modelToSave+'.TV-factor'], rng=(25, 75))
+
+            # r2: checking the 75% of the highest values
+            topvalues = round(dataframe[modelToSave + '.r2'].shape[0]/4)
+            r2_test = dataframe[modelToSave + '.r2'].sort_values(ascending=False)[:topvalues].std()
+
+            if TV_interquartile > TV_interquartile_threshold or r2_test > r2_test_threshold: # not very constant: excluded from the list
+                if TV_interquartile > TV_interquartile_threshold:
+                    reason = 'TV factor IQR'
+                else:
+                    reason = 'r2 test failed'            
+            
+            else: # everything was aceptable! we save the model
+                reason = 'ok'
+                goodtogo = True
+
+                if dataframe['total-contrib'][best_index] > 100.05:
+                    reason = 'warning: total contribs > 100'
+
+                results_to_save = [temp_client, temp_TVAdvantage, temp_ration_spend_TVresponses,
+                               temp_TVcoverage, 
+                               dataframe['model'][best_index],
+                               dataframe[modelToSave+'.r2'][best_index],
+                               dataframe[modelToSave+'.aic'][best_index],
+                               dataframe[modelToSave+'.bic'][best_index],
+                               dataframe['adstock'][best_index],
+                               dataframe[modelToSave+'.TV-factor'][best_index],
+                               dataframe[modelToSave+'.TV-coeff'][best_index],dataframe[modelToSave+'.TV-contrib'][best_index],dataframe[modelToSave+'.TV-tvalue'][best_index], 
+                               dataframe[modelToSave+'.S-coeff'][best_index],dataframe[modelToSave+'.S-contrib'][best_index],dataframe[modelToSave+'.S-tvalue'][best_index], 
+                               dataframe[modelToSave+'.T-coeff'][best_index],dataframe[modelToSave+'.T-contrib'][best_index],dataframe[modelToSave+'.T-tvalue'][best_index], 
+                               dataframe[modelToSave+'.holiday_var-coeff'][best_index],dataframe[modelToSave+'.holiday_var-contrib'][best_index],dataframe[modelToSave+'.holiday_var-tvalue'][best_index], 
+                               dataframe[modelToSave+'.Constant'][best_index],dataframe[modelToSave+'.Constant-contrib'][best_index],
+                               dataframe['total-contrib'][best_index], reason, overall_confidence]                       
+                tosave.append(results_to_save)
+
+    if not goodtogo:
+        print ('      no results for', temp_client, ':', reason)
+        results_to_save = [temp_client, temp_TVAdvantage, temp_ration_spend_TVresponses,
+                           temp_TVcoverage, 
+                           'no model', 
+                           0.0,0.0,
+                           0.0,0.0,0.0, 
+                           0.0,0.0,0.0, 
+                           0.0,0.0,0.0,0.0,
+                           0.0,0.0,0.0,0.0,
+                           0.0,0.0,0.0,
+                           0.0,reason,0.0]  
+
+        tosave.append(results_to_save) 
+        
+    best_dataframe = pd.DataFrame(data=tosave, columns=columns_tosave)
+    return best_dataframe
+
+def computeConfidence(fullclientdf,stabilityconfidence,TVcontfromADvantage,target, bestmodelflag,seasonalityvar):
+    '''
+    Function to compute the confidence of the model for each adstock value based on following rules
+    1. data quantity
+    2. percentage of input attribution of TV
+    3. colinearity of TV & target and TV & seasonality 
+    
+    Inputs:
+    fullclientdf - The full dataset for the client. i.e. all the data for that client
+    sets - An array of week numbers (number of weeks of data used) that models have been run on for this client
+    weeklyfactor - This is an array of factors calculated on a model using data upto and including that week
+    TVcontfromADvantage - This is the % contribution from ADvantage for this client, based on the target variable of interest. 
+	It is fed in, not calculated here
+    target - What is the target variable of interest? All_search&direct, all_webresponse, etc.
+    bestmodelflag - Have the models for this client, based on a full run of data, passed the model selection criteria, 1 = Yes
+    seasonalityvar - This is the seasonality variable used for the model, eg: 'GT_Super.detrended.week_dummy_seasonality'
+
+    Outputs:
+    A confidence score between 0 and 100 which will determine how far away 
+    from the bucketed adstock this client adstock will be.
+    '''
+    confidence = 0
+    confidence_due_to_datalength = 0
+    confidence_due_to_ADvantage = 0
+    confidence_due_to_colinearity = 0
+    
+    if bestmodelflag == 1: # There is a best model
+        confidencescoreweightings = [30,20,20]
+
+        ### Quantity of data confidence metric
+        if len(fullclientdf) >= 730:  #104 weeks of data!
+            confidence_due_to_datalength = confidencescoreweightings[0]
+        elif 546<= len(fullclientdf) <730:
+            confidence_due_to_datalength = confidencescoreweightings[0] * 0.6
+        elif 365<= len(fullclientdf) <546:
+            confidence_due_to_datalength = confidencescoreweightings[0] * 0.4
+        elif 182<= len(fullclientdf) <365:
+            confidence_due_to_datalength = confidencescoreweightings[0] * 0.2
+        # else: No confidence in quantity of data if we have less than half a year of data
+        
+        ### TV attribution % from ADvantage
+        if 5 <= TVcontfromADvantage < 10: ## If we have between 5 and 10% attribution in ADvantage
+            confidence_due_to_ADvantage = confidencescoreweightings[1]
+        elif 10<= TVcontfromADvantage <15: ## If we have between 10 and 15% attribution in ADvantage
+            confidence_due_to_ADvantage = confidencescoreweightings[1]*0.5
+        elif 15<= TVcontfromADvantage <20: ## If we have between 15 and 20% attribution in ADvantage
+            confidence_due_to_ADvantage = confidencescoreweightings[1]*0.25
+
+        ### Colinearity check between TV attributed response and seasonality
+        ### and comparing with the colinearity between TV and the target variable
+        ### We also dont want there to be too much collinearity between TV and the target
+        seasonalityTVcorrelation = np.corrcoef(fullclientdf['TV_attributedresponse'],fullclientdf[seasonalityvar])[0][1]
+        targetTVcorrelation = np.corrcoef(fullclientdf['TV_attributedresponse'],fullclientdf[target])[0][1]
+        
+        if targetTVcorrelation > seasonalityTVcorrelation and seasonalityTVcorrelation <= 0.25:
+            confidence_due_to_colinearity += confidencescoreweightings[2]
+        elif targetTVcorrelation > seasonalityTVcorrelation and seasonalityTVcorrelation <= 0.5:
+            confidence_due_to_colinearity += confidencescoreweightings [2] * 0.5
+                            
+        confidence = confidence_due_to_datalength + confidence_due_to_ADvantage + confidence_due_to_colinearity + stabilityconfidence
+        
+    return confidence, confidence_due_to_datalength, confidence_due_to_ADvantage, confidence_due_to_colinearity, stabilityconfidence
+#
+def filterresults(r2_array, tvpvalue_array, tvcoef_array, adstock_array):
+    '''
+    Function to filter the estimated models based on the following rules:
+    1. r2 > 0.4
+    2. IQR for the TV factor < 5.0 to avoid 'spread' solutions in the TV factor
+    4. Spread in the r2
+    
+    Input:
+    r2_array - array of r2 of estimated models
+    tvpvalue_array - array of p-value for TV coefficient of estimated models
+    tvcoef_array - array of TV coefficient of estimated models
+    adstock_array - array of adstock values of estimated models
+    
+    Output:
+    final_tvcoef - TV coefficient of selected best model
+    final_adstock - adstock value of selected best model
+    bestmodelflag - flag of best model
+    reason - reason of model evaluation
+    '''
+    final_tvcoef = 0
+    final_adstock = 0
+    reason = ""
+    
+    # Thresholds:
+    r2_threshold = 0.40
+    r2_test_threshold = 0.05 # 0.1 before
+    
+    tv_threshold = 2.0
+    tv_pthreshold = 0.05
+    TV_interquartile_threshold = 5.0
+    
+    bestmodelflag = 1 # Indicator that a model that passes each of the model selection criteria exists
+    
+    # Create dataframe from arrays
+    df = pd.DataFrame.from_dict({'r2':r2_array,'TVpval':tvpvalue_array,'tvcoef':tvcoef_array,'adstock':adstock_array})
+   
+    # Filter out any non-significant TV based results
+    df_filtered = df[df['TVpval']<=0.05]
+    
+    # Perform checks on any remaining results, if there are any
+    if len(df_filtered) > 0: 
+    
+        # scan across all r2, to check if they are all less than the threshold, i.e. if max r2 is less than the threshold
+        if max(df_filtered['r2']) < r2_threshold:
+            bestmodelflag = 0
+            reason = 'Low R2'
+      
+        # look at variation in factor and R2 values
+        df_filtered['factor'] = [df_filtered['tvcoef'][i] / (1 - df_filtered['adstock'][i]) for i in df_filtered.index]
+        
+        if len(df_filtered) >1:
+            q75, q25 = np.percentile([df_filtered['factor']], [75,25])
+            factorIQR = q75 - q25
+
+            topvalues = round(df_filtered['r2'].shape[0]/4)
+            r2_deviation_test = df_filtered['r2'].sort_values(ascending=False)[:topvalues].std()
+        else:
+            factorIQR = 0 # Only one value so there is no range
+            r2_deviation_test = 0 # Only one value so there is no deviation
+       
+        # Check for big deviation in factor and little deviation in r2
+        if factorIQR > TV_interquartile_threshold and r2_deviation_test < r2_test_threshold:
+            bestmodelflag = 0
+            reason = 'Deviation'
+       
+        # Check the factor, if it is less than 1 then it is less than ADvantage
+        maxrow = np.argmax(df_filtered['r2'])
+        if df_filtered['factor'][maxrow] < 1:
+            bestmodelflag = 0
+            reason = 'Factor greater in ADvantage'
+       
+        # If our results pass all the checks above
+        if bestmodelflag == 1:
+            final_tvcoef = df_filtered['tvcoef'][maxrow]
+            final_adstock = df_filtered['adstock'][maxrow]
+        
+    else:
+        bestmodelflag = 0    
+    
+    return final_tvcoef, final_adstock, bestmodelflag, reason
+#
+def factorstability(dataframe, model_torun, trend_variable, client_country, seasonality_variable, timeperiodofinterest, clientName, target, adstocklist, stabilityweighting = 30.):
+    '''
+    Function to evaluate the stability of the TV-factor over timeperiodofinterest
+
+    Input:
+    dataframe - dataframe of estimated models
+    model_torun - name of model
+    trend_variable - name of trend variable
+    client_country - country of client
+    seasonality_variable - name of seasonality variable
+    timeperiodofinterest - number of days to test factor stability on
+    clientName - name of client
+    target - name of target variable
+    adstocklist - list of adstock values
+    stabilityweighting - stability weighting default set to 30 = 30%
+    
+    Output:
+    factor_array
+    adstock_array
+    stabilityconfidence
+    bestmodelflag
+    '''
+    factor_array = []
+    adstock_array = []
+    reason_array = []
+    
+    stabilityconfidence = 0. # we will keep zero confidence due to this part below the timeperiodofinterest
+    bestmodelflag = 0
+    
+    # This is built on the assumption that we have over 'timeperiodofinterest' number of weeks of data:
+    if len(dataframe) > timeperiodofinterest:
+        for timeframe in range(len(dataframe)-timeperiodofinterest+1,len(dataframe)+1):
+            #print(timeframe)
+            temp_resultsdf = runModelling(dataframe=dataframe[:timeframe], 
+                                          client=clientName, 
+                                          adstocklist=adstocklist, 
+                                          target=target,
+                                          client_country=client_country,
+                                          seasonality_variable=seasonality_variable, 
+                                          trend_variable=trend_variable, 
+                                          models=[model_torun])
+            tv_coef, adstock, bestmodelflag, reason = filterresults(r2_array=temp_resultsdf[model_torun +'.r2'], 
+                                                                    tvpvalue_array=temp_resultsdf[model_torun + '.TV-pvalue'], 
+                                                                    tvcoef_array=temp_resultsdf[model_torun + '.TV-coeff'], 
+                                                                    adstock_array=temp_resultsdf['adstock'])
+
+            if bestmodelflag == 1:
+                factor_array.append(tv_coef/(1-adstock))
+                adstock_array.append(adstock)
+                reason_array.append("")
+            else:
+                factor_array.append(0.)
+                adstock_array.append(0.)
+                reason_array.append(reason)
+        
+        factorrange = max(factor_array) - min(factor_array)
+
+        ### Only considering the stability of the factor over time
+        if factorrange < 2:
+            stabilityconfidence += stabilityweighting
+        elif 2<= factorrange <4:
+            stabilityconfidence += stabilityweighting * 0.5
+        elif 4<= factorrange <6:
+            stabilityconfidence += stabilityweighting * 0.2
+        elif 6<= factorrange <8:
+            stabilityconfidence += stabilityweighting * 0.1
+
+        if factorrange == 0 and max(factor_array) == 0:
+            stabilityconfidence = 0
+    
+    return factor_array, adstock_array, stabilityconfidence, bestmodelflag #(bestmodelflag will only be for the last run/full df), reason_array
+
+########## Model Validation ##########
+def model_validation(client_index, 
+                     LocalSave, 
+                     train_data, 
+                     season_model, 
+                     seasonality_variable, 
+                     ndays_train,
+                     trend_variable,
+                     global_models):
+    '''
+    Function to validate the specified model
+    
+    Input:
+    client_index - index of client in client dictionary
+    LocalSave - folder path of google data
+    show - indicator to show the plots
+    
+    Output:
+    df_results_best_model - dataframe of selected best model
+    '''
+    client = list(clientlist)[client_index]
+
+    client_country = list(clientlist.values())[client_index]
+
+    # 2) Prepare data sets
+    prep_google = GoogleTrends(client, LocalSave)
+    prep_client = preparingClient(clientFileName=client,
+                                  rawfolder=path_rawfolder)
+
+    # 3) Train models based on trained on client or google data
+    for model in season_model:  
+        if train_data == 'client':
+            if model == 'seasonal_dummy_day':
+                if ndays_train == 'full_data':
+                    trained_data = train_model_dummy_day(dataframe=prep_client,
+                                                         feature_of_interest=target)
+                else:
+                    trained_data = train_model_dummy_day(dataframe=prep_client[:ndays_train],
+                                                         feature_of_interest=target)
+            elif model == 'seasonal_dummy_day_holiday':
+                if ndays_train == 'full_data':
+                    trained_data = train_model_dummy_day_holiday(dataframe=prep_client,
+                                                                 client_country=client_country,
+                                                                 feature_of_interest=target)
+                else:
+                    trained_data = train_model_dummy_day_holiday(dataframe=prep_client[:ndays_train],
+                                                                 client_country=client_country,
+                                                                 feature_of_interest=target)
+            elif model == 'seasonal_fourier':
+                if ndays_train == 'full_data':
+                    trained_data = train_model_fourier(dataframe=prep_client,
+                                                       feature_of_interest=target,
+                                                       threshold=threshold_fourier)
+                else:
+                    trained_data = train_model_fourier(dataframe=prep_client[:ndays_train],
+                                                       feature_of_interest=target,
+                                                       threshold=threshold_fourier)
+        elif train_data == 'google':
+            if model == 'seasonal_dummy_day':
+                if ndays_train == 'full_data':
+                    trained_data = train_model_dummy_day(dataframe=prep_google,
+                                                         feature_of_interest='gt_rescaled')
+                else:
+                    trained_data = train_model_dummy_day(dataframe=prep_google[:ndays_train],
+                                                         feature_of_interest='gt_rescaled')
+            elif model == 'seasonal_dummy_day_holiday':
+                if ndays_train == 'full_data':
+                    trained_data = train_model_dummy_day_holiday(dataframe=prep_google,
+                                                                 client_country=client_country,
+                                                                 feature_of_interest='gt_rescaled')
+                else:
+                    trained_data = train_model_dummy_day_holiday(dataframe=prep_google[:ndays_train],
+                                                                 client_country=client_country,
+                                                                 feature_of_interest='gt_rescaled')
+            elif model == 'seasonal_fourier':
+                if ndays_train == 'full_data':
+                    trained_data = train_model_fourier(dataframe=prep_google,
+                                                       feature_of_interest='gt_rescaled',
+                                                       threshold=threshold_fourier)
+                else:
+                    trained_data = train_model_fourier(dataframe=prep_google[:ndays_train],
+                                                       feature_of_interest='gt_rescaled',
+                                                       threshold=threshold_fourier)
+
+    # 4) Create dataset for global model
+    df_to_model = createDataset_forModelling(dataframe=prep_client, 
+                                             clientFileName=client, 
+                                             client_country=client_country, 
+                                             target=target, 
+                                             adstocklist=adstocklist,
+                                             TVSerie=TVseries,
+                                             seasonType=season_model[0],
+                                             trendType=trend_variable,
+                                             trained_data=trained_data, 
+                                             pvalueboundary=0.05, 
+                                             windowLength=windowLength)
+    
+    # 5) Running the model for different adstock values:
+    start = None
+    end = df_to_model.index[-90].strftime("%Y-%m-%d")
+
+    df_results_model = runModelling(dataframe=df_to_model[:end], 
+                                    client=client, 
+                                    adstocklist=adstocklist, 
+                                    target=target,
+                                    client_country=client_country,
+                                    seasonality_variable = seasonality_variable,
+                                    trend_variable = trend_variable,
+                                    models=global_models)
+
+    # 6) Compute Confidence Metrics
+    factor_array, adstock_array, stabilityconfidence, bestmodelflag = factorstability(dataframe=df_to_model, 
+                                                                                      model_torun=global_models[0], 
+                                                                                      trend_variable=trend_variable, 
+                                                                                      client_country=client_country,
+                                                                                      seasonality_variable=seasonality_variable, 
+                                                                                      timeperiodofinterest=days_to_test_stability, 
+                                                                                      clientName=client, 
+                                                                                      target=target, 
+                                                                                      adstocklist=adstocklist, 
+                                                                                      stabilityweighting = 30.)
+
+    overall_confidence, due_to_datalength, due_to_ADvantage, due_to_colinearity, due_to_stability = computeConfidence(fullclientdf=df_to_model,
+                                                                                                                  stabilityconfidence=stabilityconfidence,
+                                                                                                                  TVcontfromADvantage=df_results_model['TVADvantage contrib'][0],
+                                                                                                                  target=target, 
+                                                                                                                  bestmodelflag=bestmodelflag,
+                                                                                                                  seasonalityvar=seasonality_variable)
+    # 7) Model Results
+    df_results_best_model = bestModel(dataframe=df_results_model, 
+                                      modelToSave=global_models[0], 
+                                      targetCol=target, 
+                                      TVSerie=TVseries, 
+                                      overall_confidence=overall_confidence)
+
+    return df_results_best_model, df_to_model
+
+def run_all_models(model_specs, client_index):
+    client_validation = pd.DataFrame(columns=to_show)
+    client_df_to_model = []
+    for model in model_specs:
+        client_model_results = model_validation(client_index=client_index, 
+                     LocalSave=LocalSave,
+                     train_data=train_data,                           
+                     season_model = model_specs[model]['season_model'], 
+                     seasonality_variable = model_specs[model]['seasonality_variable'], 
+                     ndays_train = model_specs[model]['ndays_train'],
+                     trend_variable = model_specs[model]['trend_variable'],
+                     global_models = model_specs[model]['global_models'])
+        client_validation = client_validation.append(client_model_results[0])
+        client_df_to_model.append(client_model_results[1])
+    client_validation = client_validation.set_index('Model')
+    return client_validation, client_df_to_model
+
+def plot_contrib_all(client_spec_validation, client_index):
+    fig, axes=plt.subplots(nrows=len(client_spec_validation[0].index), figsize=(10,10))
+    plt.style.use(style='ggplot')
+    for m, model in enumerate(client_spec_validation[0].index):
+        target_series = client_spec_validation[1][m]['all_searchanddirect']
+        TV_series = client_spec_validation[0].iloc[m, client_spec_validation[0].columns.get_loc('TV-coeff')]*client_spec_validation[1][m]['TV_attributedresponse']
+        for var in client_spec_validation[1][m].columns:
+            if 'season' in var:
+                season_series = client_spec_validation[0].iloc[m, client_spec_validation[0].columns.get_loc('Seasonality-coeff')]*client_spec_validation[1][m][var]
+            if 'shape' in var:
+                trend_series = client_spec_validation[0].iloc[m, client_spec_validation[0].columns.get_loc('Trend-coeff')]*client_spec_validation[1][m][var]
+            if 'holiday' in var:
+                holiday_series = client_spec_validation[0].iloc[m, client_spec_validation[0].columns.get_loc('holiday_var-coeff')]*client_spec_validation[1][m][var]
+
+        axes[m].plot(target_series, label='Target Response', linewidth = 1)
+        axes[m].plot(TV_series, label='TV Contrib', linewidth = 1)
+        axes[m].plot(season_series, label='Season Contrib', linewidth = 1)
+        axes[m].plot(trend_series, label='Trend Contrib', linewidth = 1)
+        axes[m].plot(holiday_series, label='Holiday Contrib', linewidth = 1)
+        axes[m].set_title('Model '+str(m+1))
+    axes[m].legend(loc='lower center', ncol=5, bbox_to_anchor=(0.5, -0.75))
+    plt.tight_layout()
+    plt.show()
+    # save plots
+    if to_save:
+        plot_name = '6_3_Contrib_client_'+str(client_index+1)+'.pdf'
+        plt.savefig(path_graphs+plot_name)
+
+#%% Conversions
+def cleaning_df(client, rawfolder):
+    '''
+    Function to clean the conversion dataframe
+    1. read data
+    2. rename columns
+    3. remove low TV response
+    
+    Input:
+    dataframe - input dataframe with conversion related columns
+    
+    Output:
+    tempdaily_df - cleaned dataframe with conversion related columns
+    '''
+    tempdaily_df = pd.read_csv(rawfolder+client+'.csv', skiprows=11)
+    
+    tempdaily_df['conversion'] =  tempdaily_df['nondr']+tempdaily_df['dr']
+    tempdaily_df.rename(columns={"datetime": "date"}, inplace=True)
+    tempdaily_df.rename(columns={"dr": "TV_attributedresponse"}, inplace=True)
+    tempdaily_df.rename(columns={"cost": "TV_spend"}, inplace=True)
+    # Cost per attributed conversion
+    tempdaily_df['CPC_TV'] = tempdaily_df['TV_spend']/tempdaily_df['TV_attributedresponse']
+    
+    # convert date into datetime index
+    tempdaily_df['date'] = pd.to_datetime(tempdaily_df['date'])
+    tempdaily_df = tempdaily_df.set_index(pd.DatetimeIndex(tempdaily_df['date']))
+    
+    # Remove leading and trailing zero/low TV attributed responses
+    tempdaily_df = removelowTVresponse(tempdaily_df,'TV_attributedresponse')
+    
+    return tempdaily_df
+
+def model_validation_conv(client_index, 
+                     LocalSave, 
+                     train_data, 
+                     season_model, 
+                     seasonality_variable, 
+                     ndays_train,
+                     trend_variable,
+                     global_models):
+    '''
+    Function to validate the specified model
+    
+    Input:
+    client_index - index of client in client dictionary
+    LocalSave - folder path of google data
+    show - indicator to show the plots
+    
+    Output:
+    df_results_best_model - dataframe of selected best model
+    '''
+    client = list(clientlist)[client_index]
+
+    client_country = list(clientlist.values())[client_index]
+
+    # 2) Prepare data sets
+    prep_google = GoogleTrends(client, LocalSave)
+    prep_client = cleaning_df(client=client,
+                              rawfolder=rawfolder_conv)
+
+    # 3) Train models based on trained on client or google data
+    for model in season_model:  
+        if train_data == 'client':
+            if model == 'seasonal_dummy_day':
+                if ndays_train == 'full_data':
+                    trained_data = train_model_dummy_day(dataframe=prep_client,
+                                                         feature_of_interest=target)
+                else:
+                    trained_data = train_model_dummy_day(dataframe=prep_client[:ndays_train],
+                                                         feature_of_interest=target)
+            elif model == 'seasonal_dummy_day_holiday':
+                if ndays_train == 'full_data':
+                    trained_data = train_model_dummy_day_holiday(dataframe=prep_client,
+                                                                 client_country=client_country,
+                                                                 feature_of_interest=target)
+                else:
+                    trained_data = train_model_dummy_day_holiday(dataframe=prep_client[:ndays_train],
+                                                                 client_country=client_country,
+                                                                 feature_of_interest=target)
+            elif model == 'seasonal_fourier':
+                if ndays_train == 'full_data':
+                    trained_data = train_model_fourier(dataframe=prep_client,
+                                                       feature_of_interest=target,
+                                                       threshold=threshold_fourier)
+                else:
+                    trained_data = train_model_fourier(dataframe=prep_client[:ndays_train],
+                                                       feature_of_interest=target,
+                                                       threshold=threshold_fourier)
+        elif train_data == 'google':
+            if model == 'seasonal_dummy_day':
+                if ndays_train == 'full_data':
+                    trained_data = train_model_dummy_day(dataframe=prep_google,
+                                                         feature_of_interest='gt_rescaled')
+                else:
+                    trained_data = train_model_dummy_day(dataframe=prep_google[:ndays_train],
+                                                         feature_of_interest='gt_rescaled')
+            elif model == 'seasonal_dummy_day_holiday':
+                if ndays_train == 'full_data':
+                    trained_data = train_model_dummy_day_holiday(dataframe=prep_google,
+                                                                 client_country=client_country,
+                                                                 feature_of_interest='gt_rescaled')
+                else:
+                    trained_data = train_model_dummy_day_holiday(dataframe=prep_google[:ndays_train],
+                                                                 client_country=client_country,
+                                                                 feature_of_interest='gt_rescaled')
+            elif model == 'seasonal_fourier':
+                if ndays_train == 'full_data':
+                    trained_data = train_model_fourier(dataframe=prep_google,
+                                                       feature_of_interest='gt_rescaled',
+                                                       threshold=threshold_fourier)
+                else:
+                    trained_data = train_model_fourier(dataframe=prep_google[:ndays_train],
+                                                       feature_of_interest='gt_rescaled',
+                                                       threshold=threshold_fourier)
+
+    # 4) Create dataset for global model
+    df_to_model = createDataset_forModelling(dataframe=prep_client, 
+                                             clientFileName=client, 
+                                             client_country=client_country, 
+                                             target=target, 
+                                             adstocklist=adstocklist,
+                                             TVSerie=TVseries,
+                                             seasonType=season_model[0],
+                                             trendType=trend_variable,
+                                             trained_data=trained_data, 
+                                             pvalueboundary=0.05, 
+                                             windowLength=windowLength)
+    
+    # 5) Running the model for different adstock values:
+    start = None
+    end = df_to_model.index[-90].strftime("%Y-%m-%d")
+
+    df_results_model = runModelling(dataframe=df_to_model[:end], 
+                                    client=client, 
+                                    adstocklist=adstocklist, 
+                                    target=target,
+                                    client_country=client_country,
+                                    seasonality_variable = seasonality_variable,
+                                    trend_variable = trend_variable,
+                                    models=global_models)
+
+    # 6) Compute Confidence Metrics
+    factor_array, adstock_array, stabilityconfidence, bestmodelflag = factorstability(dataframe=df_to_model, 
+                                                                                      model_torun=global_models[0], 
+                                                                                      trend_variable=trend_variable, 
+                                                                                      client_country=client_country,
+                                                                                      seasonality_variable=seasonality_variable, 
+                                                                                      timeperiodofinterest=days_to_test_stability, 
+                                                                                      clientName=client, 
+                                                                                      target=target, 
+                                                                                      adstocklist=adstocklist, 
+                                                                                      stabilityweighting = 30.)
+
+    overall_confidence, due_to_datalength, due_to_ADvantage, due_to_colinearity, due_to_stability = computeConfidence(fullclientdf=df_to_model,
+                                                                                                                  stabilityconfidence=stabilityconfidence,
+                                                                                                                  TVcontfromADvantage=df_results_model['TVADvantage contrib'][0],
+                                                                                                                  target=target, 
+                                                                                                                  bestmodelflag=bestmodelflag,
+                                                                                                                  seasonalityvar=seasonality_variable)
+    # 7) Model Results
+    df_results_best_model = bestModel(dataframe=df_results_model, 
+                                      modelToSave=global_models[0], 
+                                      targetCol=target, 
+                                      TVSerie=TVseries, 
+                                      overall_confidence=overall_confidence)
+
+    return df_results_best_model, df_to_model
+
+def run_all_models_conv(model_specs, client_index):
+    client_validation = pd.DataFrame(columns=to_show)
+    client_df_to_model = []
+    for model in model_specs:
+        client_model_results = model_validation_conv(client_index=client_index, 
+                     LocalSave=LocalSave,
+                     train_data=train_data,                           
+                     season_model = model_specs[model]['season_model'], 
+                     seasonality_variable = model_specs[model]['seasonality_variable'], 
+                     ndays_train = model_specs[model]['ndays_train'],
+                     trend_variable = model_specs[model]['trend_variable'],
+                     global_models = model_specs[model]['global_models'])
+        client_validation = client_validation.append(client_model_results[0])
+        client_df_to_model.append(client_model_results[1])
+    client_validation = client_validation.set_index('Model')
+    return client_validation, client_df_to_model
+
+
+#%% Data Parameters
+# client
+clientlist = {'':'US',
+              '':'Sweden',
+              '':'US',
+              '':'Spain'}
+
+#%% Data
+# create dataframe dictionary
+dict_data_client = {name: pd.DataFrame() for name in list(clientlist.keys())}
+dict_data_google = {name: pd.DataFrame() for name in list(clientlist.keys())}
+
+for name, df in dict_data_client.items():    
+    dict_data_client[name] = preparingClient(name, path_rawfolder)
+
+for name, df in dict_data_google.items():    
+    dict_data_google[name] = GoogleTrends(name, LocalSave)
+
+#%% Figure Parameters
+target = 'all_searchanddirect'
+google = 'gt_rescaled'
+TVseries = 'TV_attributedresponse'
+to_save = False
+
+#%% 3.1 - Data: Web response
+for c, client in enumerate(list(clientlist.keys())):
+    # Major locator every 3rd month
+    months3 = mdates.MonthLocator(interval=3)
+    monthsFmt = mdates.DateFormatter("%b '%y")
+    months = mdates.MonthLocator()
+    
+    fig, axes = plt.subplots(nrows=3, figsize=(10,10), sharex=True)
+    plt.style.use(style='ggplot')
+    # ASD
+    axes[0].set_title('Target response', loc='left')
+    axes[0].plot(dict_data_client[client][target], label='Target', color='blue', linewidth = 1)
+    axes[0].xaxis.set_major_locator(months3)
+    axes[0].xaxis.set_major_formatter(monthsFmt)
+    axes[0].xaxis.set_minor_locator(months)
+    # Google Trends
+    axes[1].set_title('Google Trends', loc='left')
+    axes[1].plot(dict_data_google[client][google], label='Google Trends', color='blue', linewidth = 1)
+    axes[1].xaxis.set_major_locator(months3)
+    axes[1].xaxis.set_major_formatter(monthsFmt)
+    axes[1].xaxis.set_minor_locator(months)
+    
+    # TV Attribution
+    axes[2].set_title('TV attributed response', loc='left')
+    axes[2].plot(dict_data_client[client][TVseries], label='TV attributed response', color='blue', linewidth = 1)
+    axes[2].xaxis.set_major_locator(months3)
+    axes[2].xaxis.set_major_formatter(monthsFmt)
+    axes[2].xaxis.set_minor_locator(months)
+    
+    plt.tight_layout()
+    plt.show()
+    # save plots
+    if to_save:
+        plot_name = '4_1_Data_WebResponse_client_'+str(c+1)+'.pdf'
+        plt.savefig(path_graphs+plot_name)   
+
+#%% 5.1 - Exploratory Data Analysis
+
+# Figure: raw data + day/week season + ACF
+days = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday', 'Sunday']
+days_plot = ['Mon','Tue','Wed','Thu','Fri','Sat', 'Sun']
+
+for c, client in enumerate(list(clientlist.keys())):
+    # Normalize time series for target & google trends
+    google_data = dict_data_google[client][google]
+
+    date_temp = google_data.index[round(len(google_data.index)/2)]
+
+    start = date(date_temp.year, 1, 1).strftime("%Y-%m-%d")
+    end = date(date_temp.year, 12, 31).strftime("%Y-%m-%d")
+        
+    google_start = dict_data_google[client][google].index[0].strftime("%Y-%m-%d")
+    google_end = dict_data_google[client][google].index[-1].strftime("%Y-%m-%d")
+    
+    # Set up the axes with gridspec
+    fig = plt.figure(figsize=(10, 10))
+    plt.style.use(style='ggplot')
+
+    grid = plt.GridSpec(2, 2, hspace=0.4, wspace=0.1)
+    raw_ax = fig.add_subplot(grid[0, 0:])
+    acf_ax = fig.add_subplot(grid[1, 1])
+    day_ax = fig.add_subplot(grid[1, 0])
+    #fig.suptitle('data set - '+str(c+1))
+    
+    # Time Series: Target vs Google Trends
+    # Normalize time series for target & google trends
+    temp_client = dict_data_client[client].loc[google_start:google_end, target]/dict_data_client[client].loc[start:end, target].mean()
+    temp_google = dict_data_google[client][google]/dict_data_google[client][google].mean()
+    raw_ax.plot(temp_google, label='Google Trends', color='grey', linestyle='--', linewidth = 1)
+    raw_ax.plot(temp_client, label='Target', color='blue', linestyle='-', linewidth = 1)
+    raw_ax.set_title('Time Series: Target vs Google Trends', loc='left')
+    raw_ax.legend(loc='upper right', ncol=2, bbox_to_anchor=(1, 1.175))
+    # Day/Week: Target vs Google Trends
+    # Normalize time series for target & google trends
+    temp_client = dict_data_client[client].loc[start:end, target].groupby(dict_data_client[client].loc[start:end, target].index.weekday_name).sum().reindex(days)/dict_data_client[client].loc[start:end, target].groupby(dict_data_client[client].loc[start:end, target].index.weekday_name).sum().mean()
+    temp_google = dict_data_google[client].loc[start:end, google].groupby(dict_data_google[client].loc[start:end, google].index.weekday_name).sum().reindex(days)/dict_data_google[client].loc[start:end, google].groupby(dict_data_google[client].loc[start:end, google].index.weekday_name).sum().mean()
+    day_ax.plot(temp_google, label='Google Trends', color='grey', linestyle='--', linewidth = 1)
+    day_ax.plot(temp_client, label='Target', color='blue', linestyle='-', linewidth = 1)
+    day_ax.set_xticklabels(days_plot)
+    day_ax.set_xlabel('Day/Week', fontsize=10)
+    day_ax.set_title('Day/Week: Target vs Google Trends')
+    plt.tight_layout()
+    # ACF
+    y_client = dict_data_client[client].loc[google_start:google_end, target]
+    y_google = dict_data_google[client][google]
+    acf_client = acf(y_client, nlags=32)
+    acf_google = acf(y_google, nlags=32)
+    acf_ax.set_title('Autocorrelation Function',loc='left')
+    acf_ax.plot(acf_client, color='blue', label='ACF Client Data', linewidth = 1)
+    acf_ax.plot(acf_google, color='gray', label='ACF Google Trends', linestyle='--', linewidth = 1)
+    acf_ax.axhline(y=0,linestyle='-',color='black')
+    acf_ax.axhline(y=-1.96/np.sqrt(len(y_google)),linestyle=':',color='grey')
+    acf_ax.axhline(y=1.96/np.sqrt(len(y_google)),linestyle=':',color='grey')
+    acf_ax.xaxis.set_major_locator(plt.MultipleLocator(5))
+    acf_ax.xaxis.set_minor_locator(plt.MultipleLocator(1))
+    acf_ax.xaxis.set_major_formatter(plt.FormatStrFormatter('%d'))
+    acf_ax.yaxis.set_major_locator(plt.MultipleLocator(0.5))
+    acf_ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%.1f'))
+    acf_ax.grid(which='both', axis='x')
+    acf_ax.grid(which='minor', axis='x', alpha=0.3, linestyle='--')                                                
+    acf_ax.grid(which='major', axis='x', alpha=1)
+    acf_ax.set_xlabel('Number of lags')
+    plt.tight_layout()
+    plt.show()
+    
+    # save plots
+    if to_save:
+        plot_name = '6_1_EDA_TS_dataset_'+str(c+1)+'.pdf'
+        plt.savefig(path_graphs+plot_name)    
+
+# Figure: Histogram: weekend vs weekday: client vs google trends
+fig, axes = plt.subplots(nrows=4, ncols=2, figsize=(10,10))
+plt.style.use(style='ggplot')
+for row, client in enumerate(list(clientlist.keys())):
+    # Normalize time series for target & google trends
+    start = dict_data_google[client][google].index[0].strftime("%Y-%m-%d")
+    end = dict_data_google[client][google].index[-1].strftime("%Y-%m-%d")
+    # Client
+    temp_client = dict_data_client[client][google_start:google_end]
+    temp_client['Day'] = np.where(temp_client.index.weekday < 5, 'Weekday', 'Weekend')
+    a_client = temp_client.loc[temp_client['Day'] == 'Weekend', target]
+    b_client = temp_client.loc[temp_client['Day'] == 'Weekday', target]
+    axes[row,0].hist(a_client, bins = 50, color='grey', alpha=0.5, label='Weekday')
+    axes[row,0].hist(b_client, bins = 50, color='blue', alpha=0.5, label='Weekend')
+    axes[row,0].set_ylabel('Client '+str(row+1)+'\nCount')
+    axes[row,0].tick_params(axis='both', labelsize=8)
+    # Google
+    temp_google= dict_data_google[client][google_start:google_end]
+    temp_google['Day'] = np.where(temp_google.index.weekday < 5, 'Weekday', 'Weekend')
+    a_google = temp_google.loc[temp_google['Day'] == 'Weekend', google]
+    b_google = temp_google.loc[temp_google['Day'] == 'Weekday', google]
+    axes[row,1].hist(a_google, bins = 50, color='grey', alpha=0.5, label='Weekday')
+    axes[row,1].hist(b_google, bins = 50, color='blue', alpha=0.5, label='Weekend')
+    axes[row,1].tick_params(axis='both', labelsize=8)
+
+axes[0,0].set_title('Web Traffic Histogram')
+axes[0,1].set_title('Google Trends  Histogram')
+axes[row,0].set_xlabel('Web Traffic')
+axes[row,0].legend(loc='lower center', ncol=2, bbox_to_anchor=(0.5, -0.75))
+axes[row,1].set_xlabel('Google Trends')
+axes[row,1].legend(loc='lower center', ncol=2, bbox_to_anchor=(0.5, -0.75))
+plt.tight_layout()
+plt.show()
+
+if to_save:
+    plot_name = '6_1_Histogram.pdf'
+    plt.savefig(path_graphs+plot_name)
+
+
+#%% 5.2.1 - Seasonality Analysis: Time Domain - Figure
+traininglength = 'full'
+r2_model1 = []
+# Figure Model 1: Seasonal Indicator - Weekdays
+fig, axes = plt.subplots(nrows=4, figsize=(10, 10), sharey='row')
+plt.style.use(style='ggplot')
+for row, client in enumerate(list(clientlist.keys())):
+    # compute time domain seasonal index
+    df_data = pd.merge(left=dict_data_client[client], right=dict_data_google[client], left_index=True, right_index=True)
+    
+    # Detrend Google Trends
+    fit = getLinearFit(df_data,google)
+    detrended = df_data[google] - fit
+    df_data['google_detrend'] = detrended + np.absolute(detrended.min())
+    
+    # Indicator-Day: train model
+    if traininglength=='full':
+        trained_data = train_model_dummy_day(dataframe=df_data,
+                                             feature_of_interest=google)
+    else:
+        trained_data = train_model_dummy_day(dataframe=df_data[:traininglength],
+                                             feature_of_interest=google)
+    # Indicator-Day: compute seasonal index
+    df_data = model_dummy_day(dataframe=df_data, 
+                              coefs=trained_data[0], 
+                              pvalues=trained_data[1], 
+                              pvalueboundary=0.05)
+    
+    r2_model1.append(round(trained_data[2],2))
+    # plot     
+    axes[row].plot(df_data['google_detrend'], label='Google Trends', color='black', alpha=0.5, linewidth = 1, linestyle='-')
+    axes[row].plot(df_data['seasonal_dummy_day'], label='Seasonal Index', color='blue', alpha=0.7, linestyle='-', linewidth = 1)
+    axes[row].set_ylabel('Client '+str(row+1))
+    axes[row].tick_params(axis='both', labelsize=8)
+    axes[row].yaxis.set_major_formatter(plt.FormatStrFormatter('%.1f'))
+axes[row].legend(loc='lower center', ncol=2, bbox_to_anchor=(0.5, -0.75))
+plt.tight_layout()
+plt.show()
+
+if to_save:
+    plot_name = '6_2_1_Model1.pdf'
+    plt.savefig(path_graphs+plot_name)  
+
+# Figure Model 2: Seasonal Indicator - Weekdays & holidays
+r2_model2 = []
+fig, axes = plt.subplots(nrows=4, figsize=(10, 10), sharey='row')
+plt.style.use(style='ggplot')
+for row, client in enumerate(list(clientlist.keys())):
+    # compute time domain seasonal index
+    df_data = pd.merge(left=dict_data_client[client], right=dict_data_google[client], left_index=True, right_index=True)
+    
+    # Detrend Google Trends
+    fit = getLinearFit(df_data,google)
+    detrended = df_data[google] - fit
+    df_data['google_detrend'] = detrended + np.absolute(detrended.min())
+    
+    # Indicator-Day-Holiday: train model
+    if traininglength=='full':
+        trained_data = train_model_dummy_day_holiday(dataframe=df_data, 
+                                                     client_country=clientlist[client], 
+                                                     feature_of_interest=google)
+    else:
+        trained_data = train_model_dummy_day_holiday(dataframe=df_data[:traininglength], 
+                                                     client_country=clientlist[client], 
+                                                     feature_of_interest=google)
+    # Indicator-Day-Holiday: compute seasonal index
+    df_data = model_dummy_day_holiday(dataframe=df_data, 
+                                      coefs=trained_data[0], 
+                                      pvalues=trained_data[1], 
+                                      client_holidays=trained_data[2], 
+                                      pvalueboundary=0.05)
+    
+    r2_model2.append(round(trained_data[3],2))
+
+    # plot    
+    axes[row].plot(df_data['google_detrend'], label='Google Trends', color='black', alpha=0.5, linewidth = 1, linestyle='-')
+    axes[row].plot(df_data['seasonal_dummy_day_holiday'], label='Seasonal Index', linestyle='-', color='blue', alpha=0.7, linewidth = 1)
+    axes[row].set_ylabel('Client '+str(row+1))
+    axes[row].tick_params(axis='both', labelsize=8)
+    axes[row].yaxis.set_major_formatter(plt.FormatStrFormatter('%.1f'))
+axes[row].legend(loc='lower center', ncol=2, bbox_to_anchor=(0.5, -0.75))
+plt.tight_layout()
+plt.show()
+
+if to_save:
+    plot_name = '6_2_1_Model2.pdf'
+    plt.savefig(path_graphs+plot_name)
+
+#%% 6.2.2 - Seasonality Analysis: Frequency Domain - Discrete Fourier Analysis
+for c, client in enumerate(list(clientlist.keys())):
+    fig, axes = plt.subplots(nrows=3,ncols=2, figsize=(10, 10), sharex='col')
+    plt.style.use(style='ggplot')
+    df_temp = dict_data_google[client]
+    for row, var_treshold in enumerate([0.001, 0.01, 0.1]):
+        # Indicator-Day-Holiday: train model
+        trained_data = train_model_fourier(dataframe=df_temp, 
+                                           feature_of_interest=google, 
+                                           threshold=var_treshold)
+        # Indicator-Day-Holiday: compute seasonal index
+        df_temp = model_fourier(dataframe=df_temp, 
+                                invert_signal=trained_data[0])
+        signal_psd = trained_data[1]
+        signal_psd_thresh = trained_data[2]
+        signal_fft_freq = trained_data[3]
+        i = signal_fft_freq > 0
+        
+        axes[row,0].plot(signal_fft_freq[i], signal_psd[i], label='Signal FFT', color='grey', linewidth=1)
+        axes[row,0].plot(signal_fft_freq[i], signal_psd_thresh[i], label='Threshold FFT', color='blue', linestyle='--', linewidth=1)
+        x_tick = np.arange(0, 1.25, 0.25)
+        x_label = [r"$0$", r"$\frac{1}{4}\pi$", r"$\frac{1}{2}\pi$",  r"$\frac{3}{4}\pi$",r"$\pi$"]
+        axes[row,0].set_xticks(x_tick*np.pi)
+        axes[row,0].set_xticklabels(x_label, fontsize=10)
+        axes[row,0].yaxis.major.formatter._useMathText = True
+        axes[row,0].set_ylabel('Threshold: '+str(var_treshold)+'\nPower Density')
+        #axes[row,0].yaxis.set_major_formatter(plt.FormatStrFormatter('%'))
+        axes[row,1].plot(df_temp[google], label='Signal', color='black', alpha=0.5, linewidth=1)
+        axes[row,1].plot(df_temp['seasonal_fourier'], label='Signal Fourier Inverse', color='blue', alpha=0.5, linestyle='-', linewidth=1)
+        axes[row,1].tick_params(axis='x', labelsize=8, labelrotation=20)
+    axes[0,0].set_title('Power Density Spectrum')
+    axes[0,1].set_title('Signal vs Fourier Inverse')
+    axes[row,0].legend(loc='lower center', ncol=2, bbox_to_anchor=(0.5, -0.50))
+    axes[row,1].legend(loc='lower center', ncol=2, bbox_to_anchor=(0.5, -0.50))    
+    plt.tight_layout()
+    plt.show()
+    
+    if to_save:
+        plot_name = '6_2_2_PowerDensitySpectrum_'+str(c+1)+'.pdf'
+        plt.savefig(path_graphs+plot_name)
+#%% Threshold testing
+threshlist = np.arange(0.000, 0.1, 0.001)
+
+r2_model3_thresh = pd.DataFrame(columns=list(clientlist.keys()),
+                                index = threshlist)
+for i, thresh in enumerate(threshlist): 
+    for row, client in enumerate(list(clientlist.keys())):
+        # compute frequency domain seasonal index
+        df_data = pd.merge(left=dict_data_client[client], right=dict_data_google[client], left_index=True, right_index=True)
+        
+        # Fourier: train model
+        if traininglength=='full':
+            trained_data = train_model_fourier(dataframe=df_data, 
+                                               feature_of_interest=google, 
+                                               threshold=thresh)
+        else:
+            trained_data = train_model_fourier(dataframe=df_data[:traininglength], 
+                                               feature_of_interest=google, 
+                                               threshold=thresh)
+    
+        # Indicator-Day-Holiday: compute seasonal index
+        df_data = model_fourier(dataframe=df_data, 
+                                invert_signal=trained_data[0])
+        # r2 measure
+        r2_calc = r2_score(y_pred=df_data['seasonal_fourier'],
+                           y_true=df_data[google])
+        r2_model3_thresh.iloc[i, row] = round(r2_calc,2)
+        
+#%% Threshold Cross-Validation
+trainperiod = 365
+df_RMSE_client = pd.DataFrame(columns = list(clientlist.keys()))
+
+for client in list(clientlist.keys()):    
+    df_data = pd.merge(left=dict_data_client[client], right=dict_data_google[client], left_index=True, right_index=True)
+    RMSE = []
+    for thresh in np.arange(0.00, 1.00, 0.01):
+        RMSE_thresh = []
+        for d in np.arange(0, 30, 1):
+            # Train model
+            trained_data = train_model_fourier(dataframe=df_data[:trainperiod], 
+                                                   feature_of_interest=google, 
+                                                   threshold=thresh)
+            trainperiod += 1
+            # Predict 
+            df_data = model_fourier(dataframe=df_data[:trainperiod], 
+                                    invert_signal=trained_data[0])
+            # Compute error
+            RMSE_d = df_data['seasonal_fourier'][-1]-df_data[google][-1]
+            RMSE_thresh.append(RMSE_d)
+        # Compute RMSE
+        RMSE.append(math.sqrt(sum([i**2 for i in RMSE_thresh])))
+    df_RMSE_client[client] = RMSE
+
+#%%
+r2_model3 = []
+fig, axes = plt.subplots(nrows=4, figsize=(10, 10), sharey='row')
+plt.style.use(style='ggplot')
+for row, client in enumerate(list(clientlist.keys())):
+    # compute time domain seasonal index
+    df_data = pd.merge(left=dict_data_client[client], right=dict_data_google[client], left_index=True, right_index=True)
+    
+    # Fourier: train model
+    if traininglength=='full':
+        trained_data = train_model_fourier(dataframe=df_data, 
+                                           feature_of_interest=google, 
+                                           threshold=0.01)
+    else:
+        trained_data = train_model_fourier(dataframe=df_data[:traininglength], 
+                                           feature_of_interest=google, 
+                                           threshold=0.01)
+
+    # Indicator-Day-Holiday: compute seasonal index
+    df_data = model_fourier(dataframe=df_data, 
+                            invert_signal=trained_data[0])
+    # r2 measure
+    r2_calc = r2_score(y_pred=df_data['seasonal_fourier'],
+                       y_true=df_data[google])
+    r2_model3.append(round(r2_calc,2))
+    # plot
+    axes[row].plot(df_data[google], label='Google Trends', color='black', alpha=0.5, linewidth = 1, linestyle='-')
+    axes[row].plot(df_data['seasonal_fourier'], label='Seasonal Index', color='blue', alpha=0.7, linewidth = 1)
+    axes[row].set_ylabel('Client '+str(row+1))
+    axes[row].tick_params(axis='both', labelsize=8)
+    axes[row].yaxis.set_major_formatter(plt.FormatStrFormatter('%d'))
+axes[row].legend(loc='lower center', ncol=2, bbox_to_anchor=(0.5, -0.75))
+plt.tight_layout()
+plt.show()
+
+if to_save:
+    plot_name = '6_2_2_Model3.pdf'
+    plt.savefig(path_graphs+plot_name)
+
+#%% 6.2.3 Stability evaluation
+traininglength = 365 # windowlength used: 30,60,90,365
+### Model 1
+r2_model1 = []
+# Figure Model 1: Seasonal Indicator - Weekdays
+fig, axes = plt.subplots(nrows=4, figsize=(10, 10), sharey='row')
+plt.style.use(style='ggplot')
+for row, client in enumerate(list(clientlist.keys())):
+    # compute time domain seasonal index
+    df_data = pd.merge(left=dict_data_client[client], right=dict_data_google[client], left_index=True, right_index=True)
+    
+    # Detrend Google Trends
+    fit = getLinearFit(df_data,google)
+    detrended = df_data[google] - fit
+    df_data['google_detrend'] = detrended + np.absolute(detrended.min())
+    
+    # Indicator-Day: train model
+    if traininglength=='full':
+        trained_data = train_model_dummy_day(dataframe=df_data,
+                                             feature_of_interest='google_detrend')
+    else:
+        trained_data = train_model_dummy_day(dataframe=df_data[:traininglength],
+                                             feature_of_interest='google_detrend')
+    # Indicator-Day: compute seasonal index
+    df_data = model_dummy_day(dataframe=df_data, 
+                              coefs=trained_data[0], 
+                              pvalues=trained_data[1], 
+                              pvalueboundary=0.05)
+    
+    r2_model1.append(round(trained_data[2],2))
+    # plot     
+    axes[row].plot(df_data['google_detrend'], label='Google Trends', color='black', alpha=0.5, linewidth = 1, linestyle='-')
+    axes[row].plot(df_data['seasonal_dummy_day'], label='Seasonal Index', color='blue', alpha=0.7, linestyle='-', linewidth = 1)
+    axes[row].set_ylabel('Client '+str(row+1))
+    axes[row].tick_params(axis='both', labelsize=8)
+    axes[row].yaxis.set_major_formatter(plt.FormatStrFormatter('%.1f'))
+axes[row].legend(loc='lower center', ncol=2, bbox_to_anchor=(0.5, -0.75))
+plt.tight_layout()
+plt.show()
+
+if to_save:
+    plot_name = '6_2_3_Model1_window'+str(traininglength)+'.pdf'
+    plt.savefig(path_graphs+plot_name)  
+
+### Model 2
+r2_model2 = []
+fig, axes = plt.subplots(nrows=4, figsize=(10, 10), sharey='row')
+plt.style.use(style='ggplot')
+for row, client in enumerate(list(clientlist.keys())):
+    # compute time domain seasonal index
+    df_data = pd.merge(left=dict_data_client[client], right=dict_data_google[client], left_index=True, right_index=True)
+    
+    # Detrend Google Trends
+    fit = getLinearFit(df_data,google)
+    detrended = df_data[google] - fit
+    df_data['google_detrend'] = detrended + np.absolute(detrended.min())
+    
+    # Indicator-Day-Holiday: train model
+    if traininglength=='full':
+        trained_data = train_model_dummy_day_holiday(dataframe=df_data, 
+                                                     client_country=clientlist[client], 
+                                                     feature_of_interest='google_detrend')
+    else:
+        trained_data = train_model_dummy_day_holiday(dataframe=df_data[:traininglength], 
+                                                     client_country=clientlist[client], 
+                                                     feature_of_interest='google_detrend')
+    # Indicator-Day-Holiday: compute seasonal index
+    df_data = model_dummy_day_holiday(dataframe=df_data, 
+                                      coefs=trained_data[0], 
+                                      pvalues=trained_data[1], 
+                                      client_holidays=trained_data[2], 
+                                      pvalueboundary=0.05)
+    
+    r2_model2.append(round(trained_data[3],2))
+
+    # plot    
+    axes[row].plot(df_data['google_detrend'], label='Google Trends', color='black', alpha=0.5, linewidth = 1, linestyle='-')
+    axes[row].plot(df_data['seasonal_dummy_day_holiday'], label='Seasonal Index', linestyle='-', color='blue', alpha=0.7, linewidth = 1)
+    axes[row].set_ylabel('Client '+str(row+1))
+    axes[row].tick_params(axis='both', labelsize=8)
+    axes[row].yaxis.set_major_formatter(plt.FormatStrFormatter('%.1f'))
+axes[row].legend(loc='lower center', ncol=2, bbox_to_anchor=(0.5, -0.75))
+plt.tight_layout()
+plt.show()
+
+if to_save:
+    plot_name = '6_2_3_Model2_window'+str(traininglength)+'.pdf'
+    plt.savefig(path_graphs+plot_name)
+
+### Model 3
+r2_model3 = []
+fig, axes = plt.subplots(nrows=4, figsize=(10, 10), sharey='row')
+plt.style.use(style='ggplot')
+for row, client in enumerate(list(clientlist.keys())):
+    # compute time domain seasonal index
+    df_data = pd.merge(left=dict_data_client[client], right=dict_data_google[client], left_index=True, right_index=True)
+    
+    # Fourier: train model
+    if traininglength=='full':
+        trained_data = train_model_fourier(dataframe=df_data, 
+                                           feature_of_interest=google, 
+                                           threshold=0.01)
+    else:
+        trained_data = train_model_fourier(dataframe=df_data[:traininglength], 
+                                           feature_of_interest=google, 
+                                           threshold=0.01)
+
+    # Indicator-Day-Holiday: compute seasonal index
+    df_data = model_fourier(dataframe=df_data, 
+                            invert_signal=trained_data[0])
+    # r2 measure
+    r2_model3.append(round(r2_score(y_true=df_data[google],
+                                    y_pred=df_data['seasonal_fourier']),2))
+    # plot
+    axes[row].plot(df_data[google], label='Google Trends', color='black', alpha=0.5, linewidth = 1, linestyle='-')
+    axes[row].plot(df_data['seasonal_fourier'], label='Seasonal Index', color='blue', alpha=0.7, linewidth = 1)
+    axes[row].set_ylabel('Client '+str(row+1))
+    axes[row].tick_params(axis='both', labelsize=8)
+    axes[row].yaxis.set_major_formatter(plt.FormatStrFormatter('%d'))
+axes[row].legend(loc='lower center', ncol=2, bbox_to_anchor=(0.5, -0.75))
+plt.tight_layout()
+plt.show()
+
+if to_save:
+    plot_name = '6_2_3_Model3_window'+str(traininglength)+'.pdf'
+    plt.savefig(path_graphs+plot_name)
+
+#%% Model and results: Framework model
+########## Model specifications ##########
+model_specs = {'model_1': {'global_models': ['fullmodel'], 
+                          'season_model': ['seasonal_fourier'],
+                          'trend_variable': 'shape_Lin',
+                          'ndays_train': 365,
+                          'seasonality_variable': 'seasonal_fourier'},
+               'model_2': {'global_models': ['fullmodelholiday'],
+                          'season_model': ['seasonal_fourier'],
+                          'trend_variable': 'shape_Lin',
+                          'ndays_train': 365,
+                          'seasonality_variable': 'seasonal_fourier'},
+               'model_3': {'global_models':  ['fullmodel'],
+                           'season_model':  ['seasonal_fourier'],
+                           'trend_variable': 'shape_SG',
+                           'ndays_train': 90,
+                           'seasonality_variable': 'seasonal_fourier'},
+               'model_4': {'global_models': ['fullmodelholiday'],
+                           'season_model': ['seasonal_fourier'],
+                           'trend_variable': 'shape_SG',
+                           'ndays_train': 90,
+                           'seasonality_variable': 'seasonal_fourier'},
+               'model_5': {'global_models': ['fullmodel'],
+                           'season_model': ['seasonal_dummy_day'],
+                           'trend_variable': 'shape_SG',
+                           'ndays_train': 365,
+                           'seasonality_variable': 'seasonal_dummy_day'},
+               'model_6': {'global_models': ['fullmodel'],
+                           'season_model': ['seasonal_dummy_day_holiday'],
+                           'trend_variable': 'shape_SG',
+                           'ndays_train': 365,
+                           'seasonality_variable': 'seasonal_dummy_day_holiday'},
+               'model_7': {'global_models': ['fullmodelholiday'],
+                           'season_model': ['seasonal_dummy_day'],
+                           'trend_variable': 'shape_SG',
+                           'ndays_train': 365,
+                           'seasonality_variable': 'seasonal_dummy_day'}}
+
+# Adstock
+step = 0.05
+minAdstock, maxAdstock = 0.00, 0.90 + step
+adstocklist = np.arange(minAdstock, maxAdstock, step)
+maxDuration = 12*7
+
+# Other
+days_to_test_stability=12
+windowLength=25*7
+threshold_fourier=0.01
+
+# initialize comparison table
+to_show = ['r2', 
+           'aic', 
+           'bic', 
+           'Adstock', 
+           'TV-factor', 
+           'TV-coeff', 
+           'TV-contrib',
+           'TV-tvalue', 
+           'Seasonality-coeff', 
+           'Seasonality-contrib',
+           'Seasonality-tvalue', 
+           'Trend-coeff', 
+           'Trend-contrib', 
+           'Trend-tvalue',
+           'holiday_var-coeff', 
+           'holiday_var-contrib', 
+           'holiday_var-tvalue',
+           'Total-contrib', 
+           'Comment',
+           'Confidence'
+            ]
+
+train_data='google'
+
+########## Modelling for each client ##########
+# Client 1
+client_1_validation = run_all_models(model_specs=model_specs,
+                                     client_index=0)
+client_1_models = client_1_validation[0][to_show].transpose()
+# Client 2
+client_2_validation = run_all_models(model_specs=model_specs,
+                                     client_index=1)
+client_2_models = client_2_validation[0][to_show].transpose()
+# Client 3
+client_3_validation = run_all_models(model_specs=model_specs,
+                                     client_index=2)
+client_3_models = client_3_validation[0][to_show].transpose()
+# Client 4
+client_4_validation = run_all_models(model_specs=model_specs,
+                                     client_index=3)
+client_4_models = client_4_validation[0][to_show].transpose()
+#%%
+# Contribution plots
+plot_contrib_all(client_1_validation, 0)
+plot_contrib_all(client_2_validation, 1)
+plot_contrib_all(client_3_validation, 2)
+plot_contrib_all(client_4_validation, 3)
+#%%
+# Selected Model
+selected_model = 6
+df_model_recommend = pd.DataFrame()
+df_model_recommend[list(clientlist.keys())[0]]=client_1_validation[0].iloc[selected_model][to_show]
+df_model_recommend[list(clientlist.keys())[1]]=client_2_validation[0].iloc[selected_model][to_show]
+df_model_recommend[list(clientlist.keys())[2]]=client_3_validation[0].iloc[selected_model][to_show]
+df_model_recommend[list(clientlist.keys())[3]]=client_4_validation[0].iloc[selected_model][to_show]
+
+#%%
+# Contribution plot of selected model
+df_model_selected = client_1_validation[1][selected_model], client_2_validation[1][selected_model], client_3_validation[1][selected_model], client_4_validation[1][selected_model]
+df_model_recommend = df_model_recommend.transpose()
+
+fig, axes=plt.subplots(nrows=len(list(clientlist.keys())), figsize=(10,10))
+plt.style.use(style='ggplot')
+for c, client in enumerate(list(clientlist.keys())):
+    target_series = df_model_selected[c]['all_searchanddirect']
+    TV_series = df_model_recommend.iloc[c, df_model_recommend.columns.get_loc('TV-coeff')]*df_model_selected[c]['TV_attributedresponse']
+    for var in df_model_selected[c].columns:
+        if 'season' in var:
+            season_series = df_model_recommend.iloc[c, df_model_recommend.columns.get_loc('Seasonality-coeff')]*df_model_selected[c][var]
+        if 'shape' in var:
+            trend_series = df_model_recommend.iloc[c, df_model_recommend.columns.get_loc('Trend-coeff')]*df_model_selected[c][var]
+        if 'holiday' in var:
+            holiday_series = df_model_recommend.iloc[c, df_model_recommend.columns.get_loc('holiday_var-coeff')]*df_model_selected[c][var]
+
+    axes[c].plot(target_series, label='Target Response', linewidth = 1)
+    axes[c].plot(TV_series, label='TV Contrib', linewidth = 1)
+    axes[c].plot(season_series, label='Season Contrib', linewidth = 1)
+    axes[c].plot(trend_series, label='Trend Contrib', linewidth = 1)
+    axes[c].plot(holiday_series, label='Holiday Contrib', linewidth = 1)
+    axes[c].set_title('Client '+str(c+1))
+axes[c].legend(loc='lower center', ncol=5, bbox_to_anchor=(0.5, -0.75))
+plt.tight_layout()
+plt.show()
+# save plots
+if to_save:
+    plot_name = '6_3_Model_Select_Contrib.pdf'
+    plt.savefig(path_graphs+plot_name)
+
+#%% Conversions
+to_save = False
+
+# EDA
+nclient = len(clientlist)
+rawfolder_conv = '/Users/Mo/OneDrive - University of Edinburgh/2019_Semester_V_Dissertation/4. Data/Conversions/'
+
+fig, axes=plt.subplots(nrows=nclient, figsize=(10,10))
+plt.style.use(style='ggplot')
+for i, client in enumerate(list(clientlist.keys())):
+    df_cleaned = cleaning_df(client=client, 
+                             rawfolder=rawfolder_conv)
+    x = df_cleaned.index
+    y1 = df_cleaned['conversion']
+    y2 = df_cleaned['TV_attributedresponse']
+    y3 = df_cleaned['nondr']
+    # plot time series of interest  
+    axes[i].plot(x, y1, color='blue', label='Total Conversions', linewidth=1)
+    axes[i].plot(x, y2, color='white', label='TV-attributed Conversions', linewidth=1)
+    axes[i].plot(x, y3, color='grey', label='non-TV-attributed Conversions', linewidth=1)
+    axes[i].fill_between(x, y1,y3,color='blue',alpha=.4)
+    axes[i].fill_between(x, y2,y3,color='grey',alpha=.4)
+    axes[i].fill_between(x, y2,color='white',alpha=.4)
+
+    axes[i].set_title('Client '+str(i+1))
+axes[i].legend(loc='lower center', ncol=5, bbox_to_anchor=(0.5, -0.75))
+plt.tight_layout()
+plt.show()
+
+# save plots
+if to_save:
+    plot_name = '7_1_Conv_EDA.pdf'
+    plt.savefig(path_graphs+plot_name)
+
+#%%
+# Framework model
+target = 'conversion'
+# Client 1
+client_1_validation = run_all_models_conv(model_specs=model_specs,
+                                   client_index=0)
+df_client_1_conv = client_1_validation[0][to_show].transpose()
+# CLient 2
+client_2_validation = run_all_models_conv(model_specs=model_specs,
+                                   client_index=1)
+df_client_2_conv = client_2_validation[0][to_show].transpose()
+# Client 3
+client_3_validation = run_all_models_conv(model_specs=model_specs,
+                                   client_index=2)
+df_client_3_conv = client_3_validation[0][to_show].transpose()
+# Client 4
+client_4_validation = run_all_models_conv(model_specs=model_specs,
+                                   client_index=3)
+df_client_4_conv = client_4_validation[0][to_show].transpose()
+
+# 
+df_conv_model_select = pd.DataFrame()
+df_conv_model_select[list(clientlist.keys())[0]] = df_client_1_conv.iloc[:,6]
+df_conv_model_select[list(clientlist.keys())[1]] = df_client_2_conv.iloc[:,6]
+df_conv_model_select[list(clientlist.keys())[2]] = df_client_3_conv.iloc[:,6]
+df_conv_model_select[list(clientlist.keys())[3]] = df_client_4_conv.iloc[:,6]
